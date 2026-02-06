@@ -57,7 +57,7 @@ qwen3tts-windows-suite/
 Install dev dependencies:
 
 ```bat
-python -m pip install PySide6 huggingface_hub soundfile psutil
+py -3 -m pip install PySide6 huggingface_hub soundfile psutil
 ```
 
 ## Run in development
