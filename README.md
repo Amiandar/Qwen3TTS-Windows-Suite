@@ -60,6 +60,8 @@ Install dev dependencies:
 py -3 -m pip install PySide6 huggingface_hub soundfile psutil
 ```
 
+If Python is missing, `scripts\build_*.cmd` and `scripts\dev_run_*.cmd` will attempt automatic install via `winget` (`Python.Python.3.11`).
+
 ## Run in development
 
 ```bat
