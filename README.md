@@ -56,6 +56,13 @@ scripts\build_installer.cmd
 scripts\build_studio.cmd
 ```
 
+Скрипты сборки создают изолированные окружения `.build_venv_installer` и `.build_venv_studio`, ставят зависимости из `requirements_build_*.txt` и запускают PyInstaller через python из этих venv.
+
+Поведение артефактов:
+- `build\` — временные файлы PyInstaller (можно удалять).
+- `dist\` — готовая сборка для запуска.
+- Для onedir-сборки запускайте exe **из папки** `dist\Qwen3TTS-Installer\` или `dist\Qwen3TTS-Studio\`; не выносите exe отдельно.
+
 ## RU — Dev запуск
 ```bat
 scripts\dev_run_installer.cmd
@@ -126,6 +133,13 @@ Qwen3TTS Windows Suite is a pair of Windows apps for non-technical users:
 scripts\build_installer.cmd
 scripts\build_studio.cmd
 ```
+
+Build scripts create isolated venvs `.build_venv_installer` and `.build_venv_studio`, install dependencies from `requirements_build_*.txt`, and run PyInstaller using each venv Python.
+
+Artifact behavior:
+- `build\` — temporary PyInstaller files (safe to delete).
+- `dist\` — final runnable output.
+- For onedir builds, run exe **from inside** `dist\Qwen3TTS-Installer\` or `dist\Qwen3TTS-Studio\`; do not move the exe out alone.
 
 ## EN — Dev run
 ```bat
