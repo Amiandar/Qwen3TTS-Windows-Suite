@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QProgressBar,
     QPlainTextEdit,
@@ -79,8 +80,8 @@ class StudioWindow(QMainWindow):
         self.setWindowTitle("Qwen3TTS Studio")
         self.resize(1100, 760)
 
-        install_root = Path.cwd()
-        self.core = StudioCore(install_root, install_root / "cache", install_root / "_tmp")
+        self.core = StudioCore()
+        self._ensure_runtime_config()
 
         root = QWidget(); main = QVBoxLayout(root)
         main.addWidget(self._build_form())
@@ -90,6 +91,19 @@ class StudioWindow(QMainWindow):
 
         self.reload_models()
         self.model_combo.currentTextChanged.connect(self.update_family_visibility)
+
+
+    def _ensure_runtime_config(self):
+        try:
+            self.core.resolve_runtime_python()
+            return
+        except Exception:
+            pass
+
+        QMessageBox.information(self, "Runtime not configured", "Select Install Root prepared by Installer.")
+        folder = QFileDialog.getExistingDirectory(self, "Select Install Root", str(Path.home()))
+        if folder:
+            self.core.set_install_root(Path(folder))
 
     def _with_tip(self, label: str, widget: QWidget) -> tuple[str, QWidget]:
         widget.setToolTip(TOOLTIPS.get(label, ""))

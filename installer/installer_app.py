@@ -168,7 +168,7 @@ class InstallerWindow(QMainWindow):
         temp = Path(self.temp_edit.text())
 
         def run(cb):
-            env = self.core.setup_micromamba_env(cache, temp, cb)
+            env = self.core.setup_micromamba_env(cache, temp, self.cb_gpu.isChecked(), cb)
             cb(f"Environment ready: {env}")
 
         self._run_bg(run)

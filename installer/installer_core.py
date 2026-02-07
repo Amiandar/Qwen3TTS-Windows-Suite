@@ -6,11 +6,12 @@ import shutil
 import subprocess
 import urllib.request
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from shared.env_paths import apply_runtime_env
 from shared.hf_models import download_models, query_models
 from shared.hw_detect import HardwareInfo, detect_hardware
+from shared.runtime_config import save_runtime_config
 from shared.settings_store import load_json, save_json
 
 
@@ -43,30 +44,15 @@ class InstallerCore:
     def install_python_per_user(self, target_dir: Path, temp_root: Path, status_cb: Callable[[str], None]) -> Path:
         status_cb("Trying winget Python installation...")
         winget_cmd = [
-            "winget",
-            "install",
-            "Python.Python.3.11",
-            "--scope",
-            "user",
-            "--location",
-            str(target_dir),
-            "--silent",
-            "--accept-package-agreements",
-            "--accept-source-agreements",
+            "winget", "install", "Python.Python.3.11", "--scope", "user", "--location", str(target_dir), "--silent",
+            "--accept-package-agreements", "--accept-source-agreements",
         ]
         winget = subprocess.run(winget_cmd, capture_output=True, text=True, check=False)
         if winget.returncode != 0:
             status_cb("Winget failed, falling back to python.org installer...")
             py_installer = temp_root / "python-installer.exe"
             urllib.request.urlretrieve("https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe", py_installer)
-            cmd = [
-                str(py_installer),
-                "/quiet",
-                "InstallAllUsers=0",
-                "PrependPath=0",
-                "Include_pip=1",
-                f"TargetDir={target_dir}",
-            ]
+            cmd = [str(py_installer), "/quiet", "InstallAllUsers=0", "PrependPath=0", "Include_pip=1", f"TargetDir={target_dir}"]
             proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if proc.returncode != 0:
                 raise RuntimeError(proc.stderr or "Python install failed")
@@ -83,7 +69,7 @@ class InstallerCore:
         save_json(self.settings_path, self.settings)
         return py
 
-    def setup_micromamba_env(self, cache_root: Path, temp_root: Path, status_cb: Callable[[str], None]) -> Path:
+    def setup_micromamba_env(self, cache_root: Path, temp_root: Path, enable_gpu: bool, status_cb: Callable[[str], None]) -> Path:
         env = apply_runtime_env(cache_root=cache_root, temp_root=temp_root)
         self.log("ENV=" + json.dumps(env, ensure_ascii=False))
         mm_dir = self.install_root / "tools"
@@ -91,10 +77,8 @@ class InstallerCore:
         mm_exe = mm_dir / "micromamba.exe"
         if not mm_exe.exists():
             status_cb("Downloading micromamba...")
-            urllib.request.urlretrieve(
-                "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-win-64",
-                mm_exe,
-            )
+            urllib.request.urlretrieve("https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-win-64", mm_exe)
+
         env_path = self.install_root / "envs" / "qwen3-tts"
         status_cb("Creating/repairing environment...")
         create_cmd = [str(mm_exe), "create", "-y", "-p", str(env_path), "python=3.11", "pip", "ffmpeg", "pyside6", "libsndfile"]
@@ -102,34 +86,54 @@ class InstallerCore:
         if r.returncode != 0:
             raise RuntimeError(r.stderr or r.stdout)
 
-        pip_install = [
-            str(mm_exe),
-            "run",
-            "-p",
-            str(env_path),
-            "python",
-            "-m",
-            "pip",
-            "install",
-            "--upgrade",
-            "pip",
-            "huggingface_hub",
-            "transformers",
-            "soundfile",
-            "qwen-tts",
-            "psutil",
-            "lxml",
-        ]
-        status_cb("Installing Python packages...")
-        p = subprocess.run(pip_install, capture_output=True, text=True, check=False)
+        status_cb("Installing runtime requirements...")
+        runtime_req = Path(__file__).resolve().parent.parent / "requirements_runtime.txt"
+        pip_base = [str(mm_exe), "run", "-p", str(env_path), "python", "-m", "pip"]
+        p = subprocess.run(pip_base + ["install", "--upgrade", "pip"], capture_output=True, text=True, check=False)
         if p.returncode != 0:
             raise RuntimeError(p.stderr or p.stdout)
+        p = subprocess.run(pip_base + ["install", "-r", str(runtime_req)], capture_output=True, text=True, check=False)
+        if p.returncode != 0:
+            raise RuntimeError(p.stderr or p.stdout)
+
+        status_cb("Installing torch/runtime acceleration packages...")
+        if enable_gpu:
+            torch_cmd = pip_base + ["install", "torch", "onnxruntime-gpu"]
+        else:
+            torch_cmd = pip_base + ["install", "torch", "onnxruntime", "--index-url", "https://download.pytorch.org/whl/cpu"]
+        t = subprocess.run(torch_cmd, capture_output=True, text=True, check=False)
+        if t.returncode != 0:
+            status_cb("GPU/CPU optimized package set failed, using generic fallback...")
+            fallback = subprocess.run(pip_base + ["install", "torch", "onnxruntime"], capture_output=True, text=True, check=False)
+            if fallback.returncode != 0:
+                raise RuntimeError(fallback.stderr or fallback.stdout)
+
+        self._deploy_backend_script()
+        self._write_runtime_config(env_path, cache_root, temp_root)
 
         self.settings["env_path"] = str(env_path)
         self.settings["cache_root"] = str(cache_root)
         self.settings["temp_root"] = str(temp_root)
         save_json(self.settings_path, self.settings)
         return env_path
+
+    def _deploy_backend_script(self) -> None:
+        src = Path(__file__).resolve().parent.parent / "shared" / "runtime_backend.py"
+        dst = self.install_root / "app" / "shared" / "runtime_backend.py"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+    def _write_runtime_config(self, env_path: Path, cache_root: Path, temp_root: Path) -> None:
+        save_runtime_config(
+            {
+                "install_root": str(self.install_root),
+                "python": str(self.install_root / "python" / "python.exe"),
+                "venv_python": str(env_path / "python.exe"),
+                "cache_root": str(cache_root),
+                "temp_root": str(temp_root),
+                "version": "0.1.0",
+            }
+        )
 
     def get_hardware(self) -> HardwareInfo:
         return detect_hardware()
@@ -142,7 +146,3 @@ class InstallerCore:
             status_cb(f"{model_id}: {text}")
 
         download_models(model_ids, progress_cb=on_progress)
-
-    def cleanup(self) -> None:
-        if shutil.which("taskkill"):
-            pass

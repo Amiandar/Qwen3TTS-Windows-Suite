@@ -1,33 +1,36 @@
 from __future__ import annotations
 
 import datetime as dt
-import shutil
+import json
+import subprocess
 from pathlib import Path
 from typing import Callable, Dict, List
 
-import soundfile as sf
-from qwen_tts import Qwen3TTSModel
-
-from shared.audio_encode import wav_to_mp3
-from shared.chunking import sentence_chunks
-from shared.env_paths import apply_runtime_env
 from shared.hf_models import CANONICAL_MODELS
+from shared.runtime_config import load_runtime_config, save_runtime_config
 from shared.settings_store import load_json, save_json
-from shared.text_fb2 import load_book_text
 
 
 class StudioCore:
-    def __init__(self, install_root: Path, cache_root: Path, temp_root: Path):
-        self.install_root = install_root
-        self.cache_root = cache_root
-        self.temp_root = temp_root
-        apply_runtime_env(cache_root=cache_root, temp_root=temp_root)
+    def __init__(self):
+        self.runtime_cfg = load_runtime_config()
+        self.install_root = Path(self.runtime_cfg.get("install_root") or Path.cwd())
 
-        self.logs_dir = install_root / "logs"
+        self.logs_dir = self.install_root / "logs"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = self.logs_dir / f"studio_{dt.datetime.now():%Y%m%d_%H%M%S}.log"
-        self.settings_path = install_root / "studio_settings.json"
+        self.settings_path = self.install_root / "studio_settings.json"
         self.settings = load_json(self.settings_path, default={})
+
+    def set_install_root(self, install_root: Path) -> None:
+        self.install_root = install_root
+        cfg = load_runtime_config()
+        cfg.setdefault("version", "0.1.0")
+        cfg["install_root"] = str(install_root)
+        if "venv_python" not in cfg:
+            cfg["venv_python"] = str(install_root / "envs" / "qwen3-tts" / "python.exe")
+        save_runtime_config(cfg)
+        self.runtime_cfg = cfg
 
     def log(self, line: str) -> None:
         with self.log_path.open("a", encoding="utf-8") as f:
@@ -38,7 +41,8 @@ class StudioCore:
         save_json(self.settings_path, self.settings)
 
     def installed_models(self) -> List[str]:
-        hub = self.cache_root / "huggingface" / "hub"
+        cache_root = Path(self.runtime_cfg.get("cache_root") or (self.install_root / "cache"))
+        hub = cache_root / "huggingface" / "hub"
         if not hub.exists():
             return []
         names = []
@@ -48,49 +52,61 @@ class StudioCore:
                 names.append(m.model_id)
         return names
 
+    def resolve_runtime_python(self) -> Path:
+        cfg = load_runtime_config()
+        py = Path(cfg.get("venv_python", ""))
+        if py.exists():
+            return py
+        fallback = Path(cfg.get("install_root", "")) / "envs" / "qwen3-tts" / "python.exe"
+        if fallback.exists():
+            return fallback
+        raise FileNotFoundError("Runtime python not found. Run Installer or select install root.")
+
+    def backend_script(self) -> Path:
+        cfg = load_runtime_config()
+        install_root = Path(cfg.get("install_root", self.install_root))
+        script = install_root / "app" / "shared" / "runtime_backend.py"
+        if script.exists():
+            return script
+        local = Path(__file__).resolve().parent.parent / "shared" / "runtime_backend.py"
+        if local.exists():
+            return local
+        raise FileNotFoundError("runtime_backend.py not found")
+
     def generate_book(self, model_id: str, params: Dict, progress_cb: Callable[[int, int, str], None]) -> None:
-        output_dir = Path(params["output_dir"])
-        output_dir.mkdir(parents=True, exist_ok=True)
-        temp_work = output_dir.parent / f"{output_dir.name}.tmp"
-        if temp_work.exists():
-            shutil.rmtree(temp_work, ignore_errors=True)
-        temp_work.mkdir(parents=True, exist_ok=True)
+        cfg = load_runtime_config()
+        request = {
+            "action": "generate",
+            "model_id": model_id,
+            "cache_root": cfg.get("cache_root", str(Path(cfg.get("install_root", self.install_root)) / "cache")),
+            "temp_root": cfg.get("temp_root", str(Path(cfg.get("install_root", self.install_root)) / "_tmp")),
+            "params": params,
+        }
+        req_path = self.install_root / "_tmp" / "studio_request.json"
+        req_path.parent.mkdir(parents=True, exist_ok=True)
+        req_path.write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        try:
-            text = load_book_text(Path(params["book_file"]), skip_toc=params.get("skip_toc", True), normalize_ws=params.get("normalize_ws", True))
-            chunks = sentence_chunks(text, target_chars=int(params.get("chunk_chars", 800)), max_chars=int(params.get("max_chunk_chars", 1200)))
-            model = Qwen3TTSModel(model_name=model_id, device=params.get("device", "cpu"), dtype=params.get("dtype", "fp16"))
-            ffmpeg_bin = Path(params.get("ffmpeg_bin") or "ffmpeg")
+        cmd = [str(self.resolve_runtime_python()), str(self.backend_script()), "--request", str(req_path)]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        total = 1
+        while True:
+            line = proc.stdout.readline() if proc.stdout else ""
+            if not line:
+                if proc.poll() is not None:
+                    break
+                continue
+            line = line.strip()
+            self.log(line)
+            try:
+                msg = json.loads(line)
+            except Exception:
+                progress_cb(0, total, line)
+                continue
+            if msg.get("event") == "progress":
+                total = int(msg.get("total", total))
+                progress_cb(int(msg.get("current", 0)), total, msg.get("message", ""))
+            elif msg.get("event") == "done" and not msg.get("ok", False):
+                raise RuntimeError(msg.get("error", "Backend failed"))
 
-            for idx, chunk in enumerate(chunks, start=1):
-                wav_path = temp_work / f"{idx:03d}.wav"
-                mp3_path = output_dir / f"{idx:03d}.mp3"
-                family = "VoiceDesign" if "VoiceDesign" in model_id else "CustomVoice" if "CustomVoice" in model_id else "Base"
-                if family == "Base":
-                    audio = model.generate_voice_clone(
-                        text=chunk,
-                        ref_audio_path=params.get("ref_audio"),
-                        ref_text=params.get("ref_text") if not params.get("x_vector_only_mode") else None,
-                        x_vector_only_mode=params.get("x_vector_only_mode", True),
-                        language=params.get("language", "Russian"),
-                        max_new_tokens=int(params.get("max_new_tokens", 1024)),
-                        temperature=float(params.get("temperature", 0.7)),
-                        top_k=int(params.get("top_k", 50)),
-                        top_p=float(params.get("top_p", 0.95)),
-                        repetition_penalty=float(params.get("repetition_penalty", 1.1)),
-                    )
-                elif family == "CustomVoice":
-                    audio = model.generate_custom_voice(
-                        text=chunk,
-                        speaker=params.get("speaker"),
-                        instruct=params.get("instruct", ""),
-                        language=params.get("language", "Russian"),
-                    )
-                else:
-                    audio = model.generate_voice_design(text=chunk, instruct=params.get("instruct", ""), language=params.get("language", "Russian"))
-                sf.write(wav_path, audio, samplerate=24000)
-                wav_to_mp3(ffmpeg_bin, wav_path, mp3_path, bitrate_kbps=int(params.get("bitrate", 128)), vbr=params.get("vbr", False))
-                progress_cb(idx, len(chunks), f"Saved {mp3_path.name}")
-        finally:
-            if not params.get("keep_temp", False):
-                shutil.rmtree(temp_work, ignore_errors=True)
+        if proc.returncode not in (0, None):
+            raise RuntimeError(f"Backend exit code {proc.returncode}")

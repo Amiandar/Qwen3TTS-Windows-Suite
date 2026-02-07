@@ -58,6 +58,11 @@ scripts\build_studio.cmd
 
 Скрипты сборки создают изолированные окружения `.build_venv_installer` и `.build_venv_studio`, ставят зависимости из `requirements_build_*.txt` и запускают PyInstaller через python из этих venv.
 
+Разделение зависимостей:
+- `requirements_build_installer.txt` и `requirements_build_studio.txt` — только зависимости для сборки GUI exe.
+- `requirements_runtime.txt` — inference/ML зависимости (qwen-tts/torch/onnxruntime и т.д.), их ставит только Installer в runtime-окружение внутри выбранного Install Root.
+- Studio.exe — GUI-оболочка: запускает backend через runtime python из install-root, сама не тянет ML-стек при сборке.
+
 Поведение артефактов:
 - `build\` — временные файлы PyInstaller (можно удалять).
 - `dist\` — готовая сборка для запуска.
@@ -135,6 +140,11 @@ scripts\build_studio.cmd
 ```
 
 Build scripts create isolated venvs `.build_venv_installer` and `.build_venv_studio`, install dependencies from `requirements_build_*.txt`, and run PyInstaller using each venv Python.
+
+Dependency split:
+- `requirements_build_installer.txt` and `requirements_build_studio.txt` contain GUI/build-only dependencies.
+- `requirements_runtime.txt` contains inference/ML dependencies (qwen-tts/torch/onnxruntime etc.) and is installed only by Installer into the selected Install Root runtime environment.
+- Studio.exe is a GUI shell: it launches backend inference through runtime Python from install-root and does not pull ML stack during Studio build.
 
 Artifact behavior:
 - `build\` — temporary PyInstaller files (safe to delete).
