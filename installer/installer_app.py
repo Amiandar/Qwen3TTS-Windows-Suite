@@ -146,7 +146,20 @@ class InstallerWindow(QMainWindow):
     def load_hw(self):
         hw = self.core.get_hardware()
         warn = "\nWarning: 1.7B may be too heavy on VRAM" if hw.vram_gb and hw.vram_gb < 10 else ""
-        self.hw_summary.setText(f"CPU: {hw.cpu}\nRAM: {hw.ram_gb} GB\nGPU: {hw.gpu_name}\nVRAM: {hw.vram_gb} GB\nSuggestion: {hw.cuda_hint}{warn}")
+        if hw.gpu_vendor == "NVIDIA" and hw.vram_source == "wmi" and abs(hw.vram_gb - 4.0) < 0.2 and "RTX" in hw.gpu_name.upper():
+            warn += "\nWarning: WMI may cap VRAM at 4GB; switching to nvidia-smi/NVML/DXGI is recommended."
+        self.hw_summary.setText(
+            f"CPU: {hw.cpu}\n"
+            f"RAM: {hw.ram_gb} GB\n"
+            f"GPU: {hw.gpu_name} (index {hw.gpu_index})\n"
+            f"VRAM: {hw.vram_gb} GB ({hw.vram_bytes} bytes)\n"
+            f"VRAM Source: {hw.vram_source}\n"
+            f"Suggestion: {hw.cuda_hint}{warn}"
+        )
+        self.append_log(
+            f"Hardware detection: GPU={hw.gpu_name}, vendor={hw.gpu_vendor}, "
+            f"VRAM={hw.vram_gb} GB, source={hw.vram_source}, index={hw.gpu_index}"
+        )
 
     def _screen_components(self):
         w = QWidget(); l = QVBoxLayout(w)
