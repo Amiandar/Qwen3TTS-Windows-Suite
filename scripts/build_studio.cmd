@@ -43,11 +43,11 @@ if not exist "%VENV_PY%" (
 "%VENV_PY%" -m pip install --upgrade pip || exit /b 1
 "%VENV_PY%" -m pip install -r requirements_build_studio.txt || exit /b 1
 
-if exist build rmdir /s /q build
-if exist dist rmdir /s /q dist
+if exist "build\Qwen3TTS-Studio" rmdir /s /q "build\Qwen3TTS-Studio"
+if exist "dist\Qwen3TTS-Studio" rmdir /s /q "dist\Qwen3TTS-Studio"
 if exist Qwen3TTS-Studio.spec del /f /q Qwen3TTS-Studio.spec
 
-"%VENV_PY%" -m PyInstaller --noconfirm --windowed --name Qwen3TTS-Studio --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets studio\studio_app.py || exit /b 1
+"%VENV_PY%" -m PyInstaller --noconfirm --windowed --name Qwen3TTS-Studio --workpath "build\Qwen3TTS-Studio" --distpath "dist" --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets studio\studio_app.py || exit /b 1
 
 echo [INFO] Build complete: dist\Qwen3TTS-Studio\Qwen3TTS-Studio.exe
 exit /b 0
