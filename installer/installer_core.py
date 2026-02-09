@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import shutil
 import subprocess
+import sys
 import urllib.request
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -28,6 +28,60 @@ class InstallerCore:
         with self.log_path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
 
+    def _emit(self, status_cb: Callable[[str], None] | None, line: str) -> None:
+        self.log(line)
+        if status_cb:
+            status_cb(line)
+
+    def _run_command(
+        self,
+        cmd: List[str],
+        status_cb: Callable[[str], None] | None = None,
+        label: str = "command",
+        attempts: int = 1,
+    ) -> subprocess.CompletedProcess:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        last: subprocess.CompletedProcess | None = None
+        for attempt in range(1, attempts + 1):
+            self._emit(status_cb, f"Attempt {attempt}/{attempts}: {label}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                creationflags=creationflags,
+            )
+            last = result
+            if result.stdout.strip():
+                self._emit(status_cb, f"[{label}] stdout:\n{result.stdout.strip()}")
+            if result.stderr.strip():
+                self._emit(status_cb, f"[{label}] stderr:\n{result.stderr.strip()}")
+            if result.returncode == 0:
+                return result
+            self._emit(status_cb, f"[{label}] failed with code {result.returncode}")
+        assert last is not None
+        return last
+
+    def resolve_requirements_runtime_path(self) -> Path:
+        candidates = [
+            Path(__file__).resolve().parent.parent / "requirements_runtime.txt",
+            Path(sys.executable).resolve().parent / "requirements_runtime.txt",
+            Path(sys.executable).resolve().parent / "_internal" / "requirements_runtime.txt",
+        ]
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            base = Path(str(meipass))
+            candidates.append(base / "requirements_runtime.txt")
+            candidates.append(base / "_internal" / "requirements_runtime.txt")
+
+        for c in candidates:
+            if c.exists():
+                return c
+        raise RuntimeError(
+            "Missing requirements_runtime.txt in packaged app. Rebuild Installer (PyInstaller) "
+            "with --add-data \"requirements_runtime.txt;.\""
+        )
+
     def detect_python(self) -> Tuple[Optional[str], Optional[str]]:
         for cmd in (["py", "-3.11", "-V"], ["py", "-3", "-V"], ["python", "-V"]):
             try:
@@ -47,13 +101,13 @@ class InstallerCore:
             "winget", "install", "Python.Python.3.11", "--scope", "user", "--location", str(target_dir), "--silent",
             "--accept-package-agreements", "--accept-source-agreements",
         ]
-        winget = subprocess.run(winget_cmd, capture_output=True, text=True, check=False)
+        winget = self._run_command(winget_cmd, status_cb=status_cb, label="winget-python", attempts=1)
         if winget.returncode != 0:
             status_cb("Winget failed, falling back to python.org installer...")
             py_installer = temp_root / "python-installer.exe"
             urllib.request.urlretrieve("https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe", py_installer)
             cmd = [str(py_installer), "/quiet", "InstallAllUsers=0", "PrependPath=0", "Include_pip=1", f"TargetDir={target_dir}"]
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            proc = self._run_command(cmd, status_cb=status_cb, label="python-org-installer", attempts=1)
             if proc.returncode != 0:
                 raise RuntimeError(proc.stderr or "Python install failed")
 
@@ -62,7 +116,7 @@ class InstallerCore:
             raise RuntimeError("Could not resolve installed python.exe in selected folder")
 
         for check in ([str(py), "-V"], [str(py), "-m", "pip", "-V"]):
-            r = subprocess.run(check, capture_output=True, text=True, check=False)
+            r = self._run_command(check, status_cb=status_cb, label="python-check", attempts=1)
             if r.returncode != 0:
                 raise RuntimeError(f"Check failed: {' '.join(check)}")
         self.settings["bootstrap_python"] = str(py)
@@ -79,34 +133,40 @@ class InstallerCore:
             status_cb("Downloading micromamba...")
             urllib.request.urlretrieve("https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-win-64", mm_exe)
 
-        env_path = self.install_root / "envs" / "qwen3-tts"
-        status_cb("Creating/repairing environment...")
-        create_cmd = [str(mm_exe), "create", "-y", "-p", str(env_path), "python=3.11", "pip", "ffmpeg", "pyside6", "libsndfile"]
-        r = subprocess.run(create_cmd, capture_output=True, text=True, check=False)
-        if r.returncode != 0:
-            raise RuntimeError(r.stderr or r.stdout)
+        runtime_req = self.resolve_requirements_runtime_path()
+        self._emit(status_cb, f"Resolved runtime requirements: {runtime_req}")
 
-        status_cb("Installing runtime requirements...")
-        runtime_req = Path(__file__).resolve().parent.parent / "requirements_runtime.txt"
+        env_path = self.install_root / "envs" / "qwen3-tts"
+        create_cmd = [str(mm_exe), "create", "-y", "-p", str(env_path), "python=3.11", "pip", "ffmpeg", "pyside6", "libsndfile"]
+        create_res = self._run_command(create_cmd, status_cb=status_cb, label="micromamba-create", attempts=3)
+        if create_res.returncode != 0:
+            raise RuntimeError("Failed to create runtime environment. See installer log for micromamba output.")
+
         pip_base = [str(mm_exe), "run", "-p", str(env_path), "python", "-m", "pip"]
-        p = subprocess.run(pip_base + ["install", "--upgrade", "pip"], capture_output=True, text=True, check=False)
-        if p.returncode != 0:
-            raise RuntimeError(p.stderr or p.stdout)
-        p = subprocess.run(pip_base + ["install", "-r", str(runtime_req)], capture_output=True, text=True, check=False)
-        if p.returncode != 0:
-            raise RuntimeError(p.stderr or p.stdout)
+        p1 = self._run_command(pip_base + ["install", "--upgrade", "pip"], status_cb=status_cb, label="pip-upgrade", attempts=2)
+        if p1.returncode != 0:
+            raise RuntimeError("Failed to upgrade pip inside runtime environment.")
+
+        p2 = self._run_command(
+            pip_base + ["install", "-r", str(runtime_req)],
+            status_cb=status_cb,
+            label="pip-runtime-req",
+            attempts=2,
+        )
+        if p2.returncode != 0:
+            raise RuntimeError("Failed to install requirements_runtime.txt. See installer log for details.")
 
         status_cb("Installing torch/runtime acceleration packages...")
         if enable_gpu:
             torch_cmd = pip_base + ["install", "torch", "onnxruntime-gpu"]
         else:
             torch_cmd = pip_base + ["install", "torch", "onnxruntime", "--index-url", "https://download.pytorch.org/whl/cpu"]
-        t = subprocess.run(torch_cmd, capture_output=True, text=True, check=False)
+        t = self._run_command(torch_cmd, status_cb=status_cb, label="pip-torch-optimized", attempts=2)
         if t.returncode != 0:
             status_cb("GPU/CPU optimized package set failed, using generic fallback...")
-            fallback = subprocess.run(pip_base + ["install", "torch", "onnxruntime"], capture_output=True, text=True, check=False)
+            fallback = self._run_command(pip_base + ["install", "torch", "onnxruntime"], status_cb=status_cb, label="pip-torch-fallback", attempts=1)
             if fallback.returncode != 0:
-                raise RuntimeError(fallback.stderr or fallback.stdout)
+                raise RuntimeError("Failed to install torch/onnxruntime runtime packages.")
 
         self._deploy_backend_script()
         self._write_runtime_config(env_path, cache_root, temp_root)
@@ -121,7 +181,7 @@ class InstallerCore:
         src = Path(__file__).resolve().parent.parent / "shared" / "runtime_backend.py"
         dst = self.install_root / "app" / "shared" / "runtime_backend.py"
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        dst.write_bytes(src.read_bytes())
 
     def _write_runtime_config(self, env_path: Path, cache_root: Path, temp_root: Path) -> None:
         save_runtime_config(

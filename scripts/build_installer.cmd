@@ -47,7 +47,7 @@ if exist "build\Qwen3TTS-Installer" rmdir /s /q "build\Qwen3TTS-Installer"
 if exist "dist\Qwen3TTS-Installer" rmdir /s /q "dist\Qwen3TTS-Installer"
 if exist Qwen3TTS-Installer.spec del /f /q Qwen3TTS-Installer.spec
 
-"%VENV_PY%" -m PyInstaller --noconfirm --windowed --name Qwen3TTS-Installer --workpath "build\Qwen3TTS-Installer" --distpath "dist" --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets installer\installer_app.py || exit /b 1
+"%VENV_PY%" -m PyInstaller --noconfirm --windowed --name Qwen3TTS-Installer --workpath "build\Qwen3TTS-Installer" --distpath "dist" --add-data "requirements_runtime.txt;." --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets installer\installer_app.py || exit /b 1
 
 echo [INFO] Build complete: dist\Qwen3TTS-Installer\Qwen3TTS-Installer.exe
 exit /b 0
