@@ -1,0 +1,7 @@
+qwen-tts
+transformers
+accelerate
+tokenizers
+safetensors
+huggingface_hub
+soundfile
