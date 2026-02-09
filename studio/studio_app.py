@@ -59,7 +59,7 @@ TOOLTIPS = {
 
 
 class Worker(QThread):
-    progress = Signal(int, int, str)
+    progress = Signal(int, int, int, int, str)
     done = Signal(bool, str)
 
     def __init__(self, fn):
@@ -85,7 +85,10 @@ class StudioWindow(QMainWindow):
 
         root = QWidget(); main = QVBoxLayout(root)
         main.addWidget(self._build_form())
-        self.progress = QProgressBar(); main.addWidget(self.progress)
+        self.progress = QProgressBar(); self.progress.setFormat("Overall %p%")
+        self.chunk_progress = QProgressBar(); self.chunk_progress.setFormat("Current chunk %p%")
+        main.addWidget(self.progress)
+        main.addWidget(self.chunk_progress)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); main.addWidget(self.log)
         self.setCentralWidget(root)
 
@@ -237,11 +240,12 @@ class StudioWindow(QMainWindow):
 
     def stop(self):
         if hasattr(self, "worker") and self.worker.isRunning():
-            self.worker.requestInterruption()
-            self.log.appendPlainText("Stop requested. Will stop between chunks.")
+            self.core.request_stop()
+            self.log.appendPlainText("Stop requested. Stopping backend process...")
 
-    def on_progress(self, i: int, total: int, text: str):
+    def on_progress(self, i: int, total: int, chunk_i: int, chunk_total: int, text: str):
         self.progress.setMaximum(max(total, 1)); self.progress.setValue(i)
+        self.chunk_progress.setMaximum(max(chunk_total, 1)); self.chunk_progress.setValue(chunk_i)
         self.log.appendPlainText(f"chunk {i}/{total}: {text}")
         self.core.log(f"chunk {i}/{total}: {text}")
 

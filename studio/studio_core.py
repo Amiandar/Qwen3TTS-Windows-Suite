@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Dict, List
 
-from shared.hf_models import CANONICAL_MODELS
+from shared.model_catalog import CANONICAL_MODELS
 from shared.runtime_config import load_runtime_config, save_runtime_config
 from shared.settings_store import load_json, save_json
 
@@ -15,6 +15,7 @@ class StudioCore:
     def __init__(self):
         self.runtime_cfg = load_runtime_config()
         self.install_root = Path(self.runtime_cfg.get("install_root") or Path.cwd())
+        self.backend_proc: subprocess.Popen | None = None
 
         self.logs_dir = self.install_root / "logs"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -73,7 +74,11 @@ class StudioCore:
             return local
         raise FileNotFoundError("runtime_backend.py not found")
 
-    def generate_book(self, model_id: str, params: Dict, progress_cb: Callable[[int, int, str], None]) -> None:
+    def request_stop(self) -> None:
+        if self.backend_proc and self.backend_proc.poll() is None:
+            self.backend_proc.terminate()
+
+    def generate_book(self, model_id: str, params: Dict, progress_cb: Callable[[int, int, int, int, str], None]) -> None:
         cfg = load_runtime_config()
         request = {
             "action": "generate",
@@ -87,12 +92,12 @@ class StudioCore:
         req_path.write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
 
         cmd = [str(self.resolve_runtime_python()), str(self.backend_script()), "--request", str(req_path)]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.backend_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         total = 1
         while True:
-            line = proc.stdout.readline() if proc.stdout else ""
+            line = self.backend_proc.stdout.readline() if self.backend_proc.stdout else ""
             if not line:
-                if proc.poll() is not None:
+                if self.backend_proc.poll() is not None:
                     break
                 continue
             line = line.strip()
@@ -100,13 +105,14 @@ class StudioCore:
             try:
                 msg = json.loads(line)
             except Exception:
-                progress_cb(0, total, line)
+                progress_cb(0, total, 0, 100, line)
                 continue
             if msg.get("event") == "progress":
                 total = int(msg.get("total", total))
-                progress_cb(int(msg.get("current", 0)), total, msg.get("message", ""))
+                progress_cb(int(msg.get("current", 0)), total, int(msg.get("chunk_current", 0)), int(msg.get("chunk_total", 100)), msg.get("message", ""))
             elif msg.get("event") == "done" and not msg.get("ok", False):
                 raise RuntimeError(msg.get("error", "Backend failed"))
 
-        if proc.returncode not in (0, None):
-            raise RuntimeError(f"Backend exit code {proc.returncode}")
+        if self.backend_proc.returncode not in (0, None):
+            raise RuntimeError(f"Backend exit code {self.backend_proc.returncode}")
+        self.backend_proc = None

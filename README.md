@@ -78,7 +78,8 @@ scripts\dev_run_studio.cmd
 - Smoke удаления: `python -m installer.tools.uninstall_smoke`
 
 ## RU — Uninstall
-- Режим удаления: `python -m installer.installer_app --uninstall --dry-run`
+- Отдельный деинсталлятор: `Qwen3TTS-Uninstaller.exe` в той же папке, что и `Qwen3TTS-Installer.exe`.
+- CLI запуск для разработки: `python -m installer.uninstall_app --dry-run`.
 - По умолчанию используется манифест `InstallRoot\install_manifest.json` (можно указать `--manifest <path>`).
 
 ## RU — Troubleshooting
@@ -168,7 +169,8 @@ scripts\dev_run_studio.cmd
 - Uninstall smoke: `python -m installer.tools.uninstall_smoke`
 
 ## EN — Uninstall
-- Uninstall mode: `python -m installer.installer_app --uninstall --dry-run`
+- Dedicated uninstaller: `Qwen3TTS-Uninstaller.exe` next to `Qwen3TTS-Installer.exe`.
+- Dev CLI mode: `python -m installer.uninstall_app --dry-run`.
 - Default manifest: `InstallRoot\install_manifest.json` (override with `--manifest <path>`).
 
 ## EN — Troubleshooting

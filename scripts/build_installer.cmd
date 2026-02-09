@@ -44,11 +44,14 @@ if not exist "%VENV_PY%" (
 "%VENV_PY%" -m pip install -r requirements_build_installer.txt || exit /b 1
 
 if exist "build\Qwen3TTS-Installer" rmdir /s /q "build\Qwen3TTS-Installer"
+if exist "build\Qwen3TTS-Uninstaller" rmdir /s /q "build\Qwen3TTS-Uninstaller"
 if exist "dist\Qwen3TTS-Installer" rmdir /s /q "dist\Qwen3TTS-Installer"
 if exist Qwen3TTS-Installer.spec del /f /q Qwen3TTS-Installer.spec
+if exist Qwen3TTS-Uninstaller.spec del /f /q Qwen3TTS-Uninstaller.spec
 
 "%VENV_PY%" -m PyInstaller --noconfirm --windowed --name Qwen3TTS-Installer --workpath "build\Qwen3TTS-Installer" --distpath "dist" --add-data "requirements_runtime.txt;_internal" --add-data "shared\runtime_backend.py;_internal\shared" --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets installer\installer_app.py || exit /b 1
-
+"%VENV_PY%" -m PyInstaller --noconfirm --windowed --name Qwen3TTS-Uninstaller --workpath "build\Qwen3TTS-Uninstaller" --distpath "dist\Qwen3TTS-Installer" --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets uninstaller_app.py || exit /b 1
+if exist "dist\Qwen3TTS-Installer\Qwen3TTS-Uninstaller\Qwen3TTS-Uninstaller.exe" copy /y "dist\Qwen3TTS-Installer\Qwen3TTS-Uninstaller\Qwen3TTS-Uninstaller.exe" "dist\Qwen3TTS-Installer\Qwen3TTS-Uninstaller.exe" >nul
 
 if not exist "dist\Qwen3TTS-Installer\_internal\requirements_runtime.txt" (
   echo [ERROR] Missing packaged requirements: dist\Qwen3TTS-Installer\_internal\requirements_runtime.txt
@@ -62,5 +65,5 @@ if not exist "dist\Qwen3TTS-Installer\_internal\shared\runtime_backend.py" (
 
 "%VENV_PY%" -m installer.tools.print_paths || exit /b 1
 
-echo [INFO] Build complete: dist\Qwen3TTS-Installer\Qwen3TTS-Installer.exe
+echo [INFO] Build complete: dist\Qwen3TTS-Installer\Qwen3TTS-Installer.exe and Qwen3TTS-Uninstaller.exe
 exit /b 0
