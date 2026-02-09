@@ -82,6 +82,31 @@ class InstallerCore:
             "with --add-data \"requirements_runtime.txt;.\""
         )
 
+
+    def resolve_runtime_backend_script_path(self) -> Path:
+        candidates = [
+            Path(__file__).resolve().parent.parent / "shared" / "runtime_backend.py",
+            Path(sys.executable).resolve().parent / "shared" / "runtime_backend.py",
+            Path(sys.executable).resolve().parent / "_internal" / "shared" / "runtime_backend.py",
+        ]
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            base = Path(str(meipass))
+            candidates.append(base / "shared" / "runtime_backend.py")
+            candidates.append(base / "_internal" / "shared" / "runtime_backend.py")
+
+        for c in candidates:
+            if c.exists():
+                return c
+
+        tried = "\n".join(str(c) for c in candidates)
+        raise RuntimeError(
+            "Missing runtime backend script. Tried:\n"
+            f"{tried}\n"
+            "Rebuild installer with PyInstaller and include: "
+            "--add-data \"shared\\runtime_backend.py;_internal\\shared\""
+        )
+
     def detect_python(self) -> Tuple[Optional[str], Optional[str]]:
         for cmd in (["py", "-3.11", "-V"], ["py", "-3", "-V"], ["python", "-V"]):
             try:
@@ -134,7 +159,9 @@ class InstallerCore:
             urllib.request.urlretrieve("https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-win-64", mm_exe)
 
         runtime_req = self.resolve_requirements_runtime_path()
+        backend_script = self.resolve_runtime_backend_script_path()
         self._emit(status_cb, f"Resolved runtime requirements: {runtime_req}")
+        self._emit(status_cb, f"Resolved runtime backend: {backend_script}")
 
         env_path = self.install_root / "envs" / "qwen3-tts"
         create_cmd = [str(mm_exe), "create", "-y", "-p", str(env_path), "python=3.11", "pip", "ffmpeg", "pyside6", "libsndfile"]
@@ -168,7 +195,7 @@ class InstallerCore:
             if fallback.returncode != 0:
                 raise RuntimeError("Failed to install torch/onnxruntime runtime packages.")
 
-        self._deploy_backend_script()
+        self._deploy_backend_script(backend_script)
         self._write_runtime_config(env_path, cache_root, temp_root)
 
         self.settings["env_path"] = str(env_path)
@@ -177,8 +204,7 @@ class InstallerCore:
         save_json(self.settings_path, self.settings)
         return env_path
 
-    def _deploy_backend_script(self) -> None:
-        src = Path(__file__).resolve().parent.parent / "shared" / "runtime_backend.py"
+    def _deploy_backend_script(self, src: Path) -> None:
         dst = self.install_root / "app" / "shared" / "runtime_backend.py"
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(src.read_bytes())

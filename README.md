@@ -67,7 +67,7 @@ scripts\build_studio.cmd
 - `build\` — временные файлы PyInstaller (можно удалять).
 - `dist\` — готовая сборка для запуска.
 - Для onedir-сборки запускайте exe **из папки** `dist\Qwen3TTS-Installer\` или `dist\Qwen3TTS-Studio\`; не выносите exe отдельно.
-- `build_installer.cmd` добавляет `requirements_runtime.txt` в пакет (`--add-data`), чтобы Installer.exe находил runtime-зависимости в packaged режиме.
+- `build_installer.cmd` добавляет `requirements_runtime.txt` и `shared\runtime_backend.py` в пакет (`--add-data`), чтобы Installer.exe корректно находил runtime-зависимости и backend-скрипт в packaged режиме.
 
 ## RU — Dev запуск
 ```bat
@@ -151,7 +151,7 @@ Artifact behavior:
 - `build\` — temporary PyInstaller files (safe to delete).
 - `dist\` — final runnable output.
 - For onedir builds, run exe **from inside** `dist\Qwen3TTS-Installer\` or `dist\Qwen3TTS-Studio\`; do not move the exe out alone.
-- `build_installer.cmd` bundles `requirements_runtime.txt` via `--add-data` so Installer.exe can resolve runtime requirements in packaged mode.
+- `build_installer.cmd` bundles both `requirements_runtime.txt` and `shared\runtime_backend.py` via `--add-data` so Installer.exe can resolve runtime requirements and backend script in packaged mode.
 
 ## EN — Dev run
 ```bat
