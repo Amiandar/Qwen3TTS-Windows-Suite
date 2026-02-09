@@ -1,7 +1,17 @@
 from __future__ import annotations
 
+import os
+import sys
+import traceback
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List
+
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 from huggingface_hub import HfApi, snapshot_download
 
@@ -43,10 +53,25 @@ def query_models(token: str | None = None) -> List[ModelInfo]:
 def download_models(
     model_ids: Iterable[str],
     progress_cb: Callable[[str, str], None] | None = None,
-) -> None:
+    local_dir: str | None = None,
+) -> List[str]:
+    downloaded: List[str] = []
     for model_id in model_ids:
-        if progress_cb:
-            progress_cb(model_id, "Starting download")
-        snapshot_download(repo_id=model_id, resume_download=True)
-        if progress_cb:
-            progress_cb(model_id, "Done")
+        try:
+            if progress_cb:
+                progress_cb(model_id, "Starting download")
+            p = snapshot_download(
+                repo_id=model_id,
+                resume_download=True,
+                local_dir=local_dir,
+                local_dir_use_symlinks=False,
+            )
+            downloaded.append(str(p))
+            if progress_cb:
+                progress_cb(model_id, f"Done: {p}")
+        except Exception as ex:
+            if progress_cb:
+                progress_cb(model_id, f"ERROR: {ex}")
+                progress_cb(model_id, traceback.format_exc())
+            raise
+    return downloaded

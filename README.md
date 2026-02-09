@@ -74,6 +74,12 @@ scripts\build_studio.cmd
 scripts\dev_run_installer.cmd
 scripts\dev_run_studio.cmd
 ```
+- Проверка ресурсов: `python -m installer.tools.print_paths`
+- Smoke удаления: `python -m installer.tools.uninstall_smoke`
+
+## RU — Uninstall
+- Режим удаления: `python -m installer.installer_app --uninstall --dry-run`
+- По умолчанию используется манифест `InstallRoot\install_manifest.json` (можно указать `--manifest <path>`).
 
 ## RU — Troubleshooting
 - Ошибки скачивания моделей: проверьте сеть/прокси, повторите загрузку (resume включён).
@@ -151,13 +157,19 @@ Artifact behavior:
 - `build\` — temporary PyInstaller files (safe to delete).
 - `dist\` — final runnable output.
 - For onedir builds, run exe **from inside** `dist\Qwen3TTS-Installer\` or `dist\Qwen3TTS-Studio\`; do not move the exe out alone.
-- `build_installer.cmd` bundles both `requirements_runtime.txt` and `shared\runtime_backend.py` via `--add-data` so Installer.exe can resolve runtime requirements and backend script in packaged mode.
+- `build_installer.cmd` bundles `requirements_runtime.txt` into `_internal` and `shared\runtime_backend.py` into `_internal\shared` via `--add-data` so Installer.exe can resolve runtime requirements and backend script in packaged mode.
 
 ## EN — Dev run
 ```bat
 scripts\dev_run_installer.cmd
 scripts\dev_run_studio.cmd
 ```
+- Resource check: `python -m installer.tools.print_paths`
+- Uninstall smoke: `python -m installer.tools.uninstall_smoke`
+
+## EN — Uninstall
+- Uninstall mode: `python -m installer.installer_app --uninstall --dry-run`
+- Default manifest: `InstallRoot\install_manifest.json` (override with `--manifest <path>`).
 
 ## EN — Troubleshooting
 - Model download failures: check network/proxy and retry (resume is enabled).

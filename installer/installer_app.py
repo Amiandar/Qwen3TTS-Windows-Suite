@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -23,7 +24,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from installer.gui_stream import ensure_streams
 from installer.installer_core import InstallerCore
+from installer.uninstall_app import UninstallWindow
 
 
 class Worker(QThread):
@@ -69,9 +72,20 @@ class InstallerWindow(QMainWindow):
         self._screen_models()
         self._screen_done()
 
+        try:
+            self.core.startup_self_check()
+        except Exception as e:
+            self.append_log(f"ERROR: {e}")
+            QMessageBox.critical(self, "Missing resources", str(e))
+
     def append_log(self, text: str):
-        self.log.appendPlainText(text)
-        self.core.log(text)
+        if text is None:
+            return
+        t = str(text).strip()
+        if not t:
+            return
+        self.log.appendPlainText(t)
+        self.core.log(t)
 
     def _pick_dir(self, edit: QLineEdit):
         folder = QFileDialog.getExistingDirectory(self, "Select folder", edit.text() or str(Path.home()))
@@ -219,7 +233,14 @@ class InstallerWindow(QMainWindow):
     def _screen_done(self):
         w = QWidget(); l = QVBoxLayout(w)
         l.addWidget(QLabel("Installation complete. You can now launch Studio."))
+        btn_un = QPushButton("Open Uninstaller")
+        btn_un.clicked.connect(self.open_uninstaller)
+        l.addWidget(btn_un)
         self.stack.addWidget(w)
+
+    def open_uninstaller(self):
+        self.un_window = UninstallWindow(self.install_root / "install_manifest.json", dry_run_default=True)
+        self.un_window.show()
 
     def _run_bg(self, fn):
         self.worker = Worker(fn)
@@ -236,8 +257,19 @@ class InstallerWindow(QMainWindow):
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--uninstall", action="store_true")
+    parser.add_argument("--manifest", default="")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    stream = ensure_streams()
     app = QApplication(sys.argv)
-    win = InstallerWindow()
+    if args.uninstall:
+        win = UninstallWindow(Path(args.manifest) if args.manifest else None, dry_run_default=args.dry_run)
+    else:
+        win = InstallerWindow()
+    stream.set_callback(lambda msg: win.log.appendPlainText(msg) if hasattr(win, "log") else None)
     win.show()
     return app.exec()
 
