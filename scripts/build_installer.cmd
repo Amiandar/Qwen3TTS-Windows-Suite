@@ -54,7 +54,7 @@ if exist "%UNINSTALLER_DIR%" rmdir /s /q "%UNINSTALLER_DIR%"
 if exist Qwen3TTS-Installer.spec del /f /q Qwen3TTS-Installer.spec
 if exist Qwen3TTS-Uninstaller.spec del /f /q Qwen3TTS-Uninstaller.spec
 
-"%VENV_PY%" -m PyInstaller --noconfirm --windowed --name Qwen3TTS-Installer --workpath "build\Qwen3TTS-Installer" --distpath "%DIST_ROOT%" --add-data "requirements_runtime.txt;_internal" --add-data "shared\runtime_backend.py;_internal\shared" --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets installer\installer_app.py || exit /b 1
+"%VENV_PY%" -m PyInstaller --noconfirm --windowed --name Qwen3TTS-Installer --workpath "build\Qwen3TTS-Installer" --distpath "%DIST_ROOT%" --add-data "requirements_runtime.txt;." --add-data "shared\runtime_backend.py;shared" --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets installer\installer_app.py || exit /b 1
 "%VENV_PY%" -m PyInstaller --noconfirm --windowed --name Qwen3TTS-Uninstaller --workpath "build\Qwen3TTS-Uninstaller" --distpath "%DIST_ROOT%" --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets uninstaller_app.py || exit /b 1
 
 if not exist "%UNINSTALLER_DIR%\Qwen3TTS-Uninstaller.exe" (
@@ -63,10 +63,20 @@ if not exist "%UNINSTALLER_DIR%\Qwen3TTS-Uninstaller.exe" (
 )
 copy /y "%UNINSTALLER_DIR%\Qwen3TTS-Uninstaller.exe" "%INSTALLER_DIR%\Qwen3TTS-Uninstaller.exe" >nul || exit /b 1
 
+if exist "%INSTALLER_DIR%\_internal\_internal\requirements_runtime.txt" (
+  echo [WARN] Detected nested path: %INSTALLER_DIR%\_internal\_internal\requirements_runtime.txt
+  echo [WARN] This indicates wrong add-data destination. Use --add-data "requirements_runtime.txt;."
+)
+
+if exist "%INSTALLER_DIR%\_internal\_internal\shared\runtime_backend.py" (
+  echo [WARN] Detected nested backend path: %INSTALLER_DIR%\_internal\_internal\shared\runtime_backend.py
+  echo [WARN] Use --add-data "shared\runtime_backend.py;shared" to avoid _internal\_internal nesting.
+)
+
 if not exist "%INSTALLER_DIR%\_internal\requirements_runtime.txt" (
   echo [WARN] Missing packaged requirements: %INSTALLER_DIR%\_internal\requirements_runtime.txt
   echo [WARN] Packaging mode: onedir
-  echo [WARN] Check Installer add-data syntax, it must be: --add-data "requirements_runtime.txt;_internal"
+  echo [WARN] Check Installer add-data syntax, it must be: --add-data "requirements_runtime.txt;." and --add-data "shared\runtime_backend.py;shared"
   if exist "%INSTALLER_DIR%\_internal" (
     echo [WARN] Existing contents of %INSTALLER_DIR%\_internal:
     dir /b "%INSTALLER_DIR%\_internal"
@@ -78,6 +88,7 @@ if not exist "%INSTALLER_DIR%\_internal\requirements_runtime.txt" (
     copy /y "requirements_runtime.txt" "%INSTALLER_DIR%\_internal\requirements_runtime.txt" >nul || exit /b 1
   )
 )
+
 
 if not exist "%INSTALLER_DIR%\_internal\requirements_runtime.txt" (
   echo [ERROR] Missing packaged requirements: %INSTALLER_DIR%\_internal\requirements_runtime.txt
