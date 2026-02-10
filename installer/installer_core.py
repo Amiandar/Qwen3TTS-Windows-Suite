@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -30,6 +31,8 @@ class InstallerCore:
         self.settings = load_json(self.settings_path, default={})
         self.manifest = InstallManifest(install_root)
         self.manifest.load()
+        self.cancel_event = Event()
+        self._current_proc: subprocess.Popen | None = None
 
     def log(self, line: str) -> None:
         with self.log_path.open("a", encoding="utf-8") as f:
@@ -44,6 +47,22 @@ class InstallerCore:
         if cb:
             cb(stage_id, status, current, total, message)
 
+    def request_cancel(self) -> None:
+        self.cancel_event.set()
+        proc = self._current_proc
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    def clear_cancel(self) -> None:
+        self.cancel_event.clear()
+
     def startup_self_check(self) -> None:
         rows = debug_resource_roots()
         for name, path, exists in rows:
@@ -55,19 +74,45 @@ class InstallerCore:
 
     def _run_command(self, cmd: List[str], status_cb: Callable[[str], None] | None = None, label: str = "command", attempts: int = 1) -> subprocess.CompletedProcess:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        last: subprocess.CompletedProcess | None = None
+        last = subprocess.CompletedProcess(cmd, 1, "", "")
         for attempt in range(1, attempts + 1):
+            if self.cancel_event.is_set():
+                raise RuntimeError("Cancelled by user")
             self._emit(status_cb, f"Attempt {attempt}/{attempts}: {label}")
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False, creationflags=creationflags)
-            last = result
-            if result.stdout.strip():
-                self._emit(status_cb, f"[{label}] stdout:\n{result.stdout.strip()}")
-            if result.stderr.strip():
-                self._emit(status_cb, f"[{label}] stderr:\n{result.stderr.strip()}")
-            if result.returncode == 0:
-                return result
-            self._emit(status_cb, f"[{label}] failed with code {result.returncode}")
-        assert last is not None
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                creationflags=creationflags,
+            )
+            self._current_proc = proc
+            out_lines: list[str] = []
+            try:
+                if proc.stdout is not None:
+                    for raw in iter(proc.stdout.readline, ""):
+                        if not raw:
+                            break
+                        line = raw.rstrip("\n")
+                        out_lines.append(line)
+                        self._emit(status_cb, f"[{label}] {line}")
+                        if self.cancel_event.is_set():
+                            self._emit(status_cb, f"[{label}] cancellation requested")
+                            try:
+                                proc.terminate()
+                                proc.wait(timeout=2)
+                            except Exception:
+                                proc.kill()
+                            return subprocess.CompletedProcess(cmd, 130, "\n".join(out_lines), "cancelled")
+                rc = proc.wait()
+            finally:
+                self._current_proc = None
+            stdout = "\n".join(out_lines)
+            last = subprocess.CompletedProcess(cmd, rc, stdout, "")
+            if rc == 0:
+                return last
+            self._emit(status_cb, f"[{label}] failed with code {rc}")
         return last
 
     def resolve_requirements_runtime_path(self) -> Path:
@@ -130,7 +175,7 @@ class InstallerCore:
             cmd = [str(py_installer), "/quiet", "InstallAllUsers=0", "PrependPath=0", "Include_pip=1", f"TargetDir={target_dir}"]
             proc = self._run_command(cmd, status_cb=status_cb, label="python-org-installer", attempts=1)
             if proc.returncode != 0:
-                raise RuntimeError(proc.stderr or "Python install failed")
+                raise RuntimeError("Python install failed")
 
         py = target_dir / "python.exe"
         if not py.exists():
@@ -145,6 +190,7 @@ class InstallerCore:
         return py
 
     def setup_micromamba_env(self, cache_root: Path, temp_root: Path, enable_gpu: bool, status_cb: Callable[[str], None], stage_cb: StageCb = None) -> Path:
+        self.clear_cancel()
         self._stage(stage_cb, "B1", "running", 0, 100, "Preparing micromamba")
         env = apply_runtime_env(cache_root=cache_root, temp_root=temp_root)
         self.log("ENV=" + json.dumps(env, ensure_ascii=False))
@@ -165,14 +211,16 @@ class InstallerCore:
         env_pre = env_path.exists()
         self._stage(stage_cb, "B2", "running", 0, 100, "Creating/updating runtime env")
         create_cmd = [str(mm_exe), "create", "-y", "-p", str(env_path), "python=3.11", "pip", "ffmpeg", "pyside6", "libsndfile"]
-        create_res = self._run_command(create_cmd, status_cb=status_cb, label="micromamba-create", attempts=3)
+        create_res = self._run_command(create_cmd, status_cb=status_cb, label="micromamba-create", attempts=2)
         if create_res.returncode != 0:
             self._stage(stage_cb, "B2", "failed", 0, 100, "micromamba create failed")
-            raise RuntimeError("Failed to create runtime environment. See installer log for micromamba output.")
+            if create_res.returncode == 130:
+                raise RuntimeError("Cancelled by user")
+            raise RuntimeError("Failed to create runtime environment.")
         self._stage(stage_cb, "B2", "done", 100, 100, "Runtime env ready")
 
-        self._stage(stage_cb, "C1", "running", 0, 100, "Upgrading pip")
         pip_base = [str(mm_exe), "run", "-p", str(env_path), "python", "-m", "pip"]
+        self._stage(stage_cb, "C1", "running", 0, 100, "Upgrading pip")
         p1 = self._run_command(pip_base + ["install", "--upgrade", "pip"], status_cb=status_cb, label="pip-upgrade", attempts=2)
         if p1.returncode != 0:
             self._stage(stage_cb, "C1", "failed", 0, 100, "pip upgrade failed")
@@ -183,7 +231,7 @@ class InstallerCore:
         p2 = self._run_command(pip_base + ["install", "-r", str(runtime_req)], status_cb=status_cb, label="pip-runtime-req", attempts=2)
         if p2.returncode != 0:
             self._stage(stage_cb, "C2", "failed", 0, 100, "requirements install failed")
-            raise RuntimeError("Failed to install requirements_runtime.txt. See installer log for details.")
+            raise RuntimeError("Failed to install requirements_runtime.txt")
         self._stage(stage_cb, "C2", "done", 100, 100, "Runtime requirements installed")
 
         status_cb("Installing torch/runtime acceleration packages...")
@@ -196,11 +244,12 @@ class InstallerCore:
                 raise RuntimeError("Failed to install torch/onnxruntime runtime packages.")
 
         self._stage(stage_cb, "C3", "running", 0, 100, "Smoke imports")
-        smoke = self._run_command([str(mm_exe), "run", "-p", str(env_path), "python", "-c", "import torch, onnxruntime, huggingface_hub"], status_cb=status_cb, label="smoke-imports", attempts=1)
+        smoke_cmd = [str(mm_exe), "run", "-p", str(env_path), "python", "-c", "import torch, onnxruntime, huggingface_hub, PySide6"]
+        smoke = self._run_command(smoke_cmd, status_cb=status_cb, label="smoke-imports", attempts=1)
         if smoke.returncode != 0:
             self._emit(status_cb, "Smoke imports failed, trying to repair huggingface_hub...")
             self._run_command(pip_base + ["install", "huggingface_hub"], status_cb=status_cb, label="pip-install-hf-hub", attempts=1)
-            smoke_retry = self._run_command([str(mm_exe), "run", "-p", str(env_path), "python", "-c", "import torch, onnxruntime, huggingface_hub"], status_cb=status_cb, label="smoke-imports-retry", attempts=1)
+            smoke_retry = self._run_command(smoke_cmd, status_cb=status_cb, label="smoke-imports-retry", attempts=1)
             if smoke_retry.returncode != 0:
                 self._stage(stage_cb, "C3", "failed", 0, 100, "Smoke imports failed")
                 raise RuntimeError("Runtime import check failed")
@@ -223,6 +272,42 @@ class InstallerCore:
         self._stage(stage_cb, "E1", "done", 100, 100, "Manifest updated")
         self._stage(stage_cb, "E2", "done", 100, 100, "Finalize")
         return env_path
+
+    def verify_runtime_installation(self, cache_root: Path, temp_root: Path, status_cb: Callable[[str], None]) -> bool:
+        self.clear_cancel()
+        apply_runtime_env(cache_root=cache_root, temp_root=temp_root)
+        mm_exe = self.install_root / "tools" / "micromamba.exe"
+        env_path = self.install_root / "envs" / "qwen3-tts"
+
+        ok = True
+        status_cb("Verify: checking micromamba binary...")
+        if not mm_exe.exists():
+            status_cb(f"FAIL: micromamba missing at {mm_exe}")
+            return False
+        if self._run_command([str(mm_exe), "--version"], status_cb=status_cb, label="verify-micromamba", attempts=1).returncode != 0:
+            return False
+
+        status_cb("Verify: checking runtime env...")
+        if not env_path.exists():
+            status_cb(f"FAIL: runtime env missing at {env_path}")
+            ok = False
+
+        verify_cmds = [
+            ([str(mm_exe), "run", "-p", str(env_path), "python", "-c", "import sys; print(sys.executable)"], "verify-python"),
+            ([str(mm_exe), "run", "-p", str(env_path), "python", "-c", "import torch, onnxruntime, huggingface_hub, PySide6"], "verify-imports"),
+            ([str(mm_exe), "run", "-p", str(env_path), "python", "-m", "pip", "--version"], "verify-pip"),
+        ]
+        for cmd, label in verify_cmds:
+            res = self._run_command(cmd, status_cb=status_cb, label=label, attempts=1)
+            if res.returncode != 0:
+                ok = False
+
+        free_gb = shutil.disk_usage(self.install_root).free / (1024**3)
+        status_cb(f"Verify: free disk space {free_gb:.1f} GB")
+        if free_gb < 5.0:
+            status_cb("WARN: free disk space below 5 GB")
+        status_cb("Verify: OK" if ok else "Verify: FAIL")
+        return ok
 
     def _deploy_backend_script(self, src: Path) -> None:
         dst = self.install_root / "app" / "shared" / "runtime_backend.py"

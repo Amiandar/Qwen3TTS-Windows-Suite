@@ -88,6 +88,7 @@ scripts\dev_run_studio.cmd
 - Не найден ffmpeg: повторите repair через Installer Components.
 - Нехватка VRAM: используйте 0.6B или CPU.
 - Ошибки прав: выберите Install/Cache/Temp в доступных папках пользователя.
+- Если Installer аварийно завершился: проверьте лог `InstallRoot\logs\installer_runtime_page.log`.
 
 ---
 
@@ -179,3 +180,4 @@ scripts\dev_run_studio.cmd
 - Missing ffmpeg: run Installer repair/components again.
 - Low VRAM: use 0.6B models or CPU mode.
 - Permission errors: choose user-writable Install/Cache/Temp folders.
+- If Installer crashes unexpectedly: check `InstallRoot\logs\installer_runtime_page.log`.

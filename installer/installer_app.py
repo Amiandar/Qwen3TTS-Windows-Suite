@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import sys
+import traceback
 from pathlib import Path
 from threading import Event
 
@@ -47,9 +49,48 @@ class Worker(QThread):
             self.done.emit(False, str(e))
 
 
-class InstallerWindow(QMainWindow):
-    def __init__(self):
+class RuntimeInstallWorker(QThread):
+    sig_log = Signal(str)
+    sig_stage = Signal(str, str, int, int, str)
+    sig_done = Signal(bool, str)
+
+    def __init__(self, core: InstallerCore, cache: Path, temp: Path, enable_gpu: bool):
         super().__init__()
+        self.core = core
+        self.cache = cache
+        self.temp = temp
+        self.enable_gpu = enable_gpu
+
+    def run(self):
+        try:
+            self.core.setup_micromamba_env(self.cache, self.temp, self.enable_gpu, self.sig_log.emit, self.sig_stage.emit)
+            self.sig_done.emit(True, "Runtime install completed")
+        except Exception as exc:
+            self.sig_done.emit(False, str(exc))
+
+
+class VerifyWorker(QThread):
+    sig_log = Signal(str)
+    sig_done = Signal(bool, str)
+
+    def __init__(self, core: InstallerCore, cache: Path, temp: Path):
+        super().__init__()
+        self.core = core
+        self.cache = cache
+        self.temp = temp
+
+    def run(self):
+        try:
+            ok = self.core.verify_runtime_installation(self.cache, self.temp, self.sig_log.emit)
+            self.sig_done.emit(ok, "Verified" if ok else "Verification failed")
+        except Exception as exc:
+            self.sig_done.emit(False, str(exc))
+
+
+class InstallerWindow(QMainWindow):
+    def __init__(self, debug: bool = False):
+        super().__init__()
+        self.debug = debug
         self.setWindowTitle("Qwen3TTS Installer")
         self.resize(1040, 760)
 
@@ -57,6 +98,7 @@ class InstallerWindow(QMainWindow):
         self.core = InstallerCore(self.install_root)
         self.model_cancel = Event()
         self.model_states: dict[str, dict] = {}
+        self.runtime_verified = False
 
         self.stack = QStackedWidget()
         self.log = QPlainTextEdit(); self.log.setReadOnly(True)
@@ -70,12 +112,26 @@ class InstallerWindow(QMainWindow):
         self._screen_python(); self._screen_paths(); self._screen_hw(); self._screen_components(); self._screen_models(); self._screen_done()
         self.detect_python()
 
+        self.crash_log_path = self.core.logs_dir / "installer_runtime_page.log"
+        self._fault_file = self.crash_log_path.open("a", encoding="utf-8")
+        faulthandler.enable(file=self._fault_file, all_threads=True)
+
+    def install_exception_hooks(self) -> None:
+        def _excepthook(exc_type, exc, tb):
+            text = "".join(traceback.format_exception(exc_type, exc, tb))
+            with self.crash_log_path.open("a", encoding="utf-8") as f:
+                f.write(text + "\n")
+            QMessageBox.critical(self, "Fatal error", f"Unexpected error. See log:\n{self.crash_log_path}")
+        sys.excepthook = _excepthook
+
     def append_log(self, text: str):
         if text:
             t = str(text).strip()
             if t:
                 self.log.appendPlainText(t)
                 self.core.log(t)
+                with self.crash_log_path.open("a", encoding="utf-8") as f:
+                    f.write(t + "\n")
 
     def _pick_dir(self, edit: QLineEdit):
         folder = QFileDialog.getExistingDirectory(self, "Select folder", edit.text() or str(Path.home()))
@@ -117,6 +173,7 @@ class InstallerWindow(QMainWindow):
 
     def _to_hw(self):
         self.install_root = Path(self.install_edit.text()); self.core = InstallerCore(self.install_root)
+        self.crash_log_path = self.core.logs_dir / "installer_runtime_page.log"
         self.stack.setCurrentIndex(2); self.hw_summary.setText("Click Refresh")
 
     def _screen_hw(self):
@@ -133,10 +190,19 @@ class InstallerWindow(QMainWindow):
     def _screen_components(self):
         w = QWidget(); l = QVBoxLayout(w)
         self.cb_gpu = QCheckBox("Enable GPU acceleration if available"); self.cb_gpu.setChecked(True)
-        install_btn = QPushButton("Install"); install_btn.clicked.connect(self.install_components)
-        next_btn = QPushButton("Next"); next_btn.clicked.connect(lambda: self.stack.setCurrentIndex(4))
+        self.install_btn = QPushButton("Install runtime")
+        self.install_btn.clicked.connect(self.install_components)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self.cancel_install_components)
+        self.verify_btn = QPushButton("Verify / Check installation")
+        self.verify_btn.clicked.connect(self.verify_components)
+        self.runtime_status = QLabel("Not installed")
+        self.next_btn = QPushButton("Next")
+        self.next_btn.setEnabled(False)
+        self.next_btn.clicked.connect(lambda: self.stack.setCurrentIndex(4))
         self.stage_rows = {}
-        grid = QGridLayout();
+        grid = QGridLayout()
         for row, (sid, title) in enumerate([
             ("B1", "micromamba_bootstrap"), ("B2", "env_create_or_update"), ("B3", "cache_temp_redirects"),
             ("C1", "pip_bootstrap"), ("C2", "runtime_requirements_install"), ("C3", "smoke_imports"),
@@ -147,7 +213,10 @@ class InstallerWindow(QMainWindow):
             grid.addWidget(QLabel(title), row, 0); grid.addWidget(p, row, 1); grid.addWidget(lbl, row, 2)
             self.stage_rows[sid] = (p, lbl)
         l.addLayout(grid)
-        l.addWidget(self.cb_gpu); l.addWidget(install_btn); l.addWidget(next_btn)
+        row_btns = QHBoxLayout(); row_btns.addWidget(self.install_btn); row_btns.addWidget(self.cancel_btn); row_btns.addWidget(self.verify_btn); row_btns.addWidget(self.next_btn)
+        l.addWidget(self.cb_gpu); l.addLayout(row_btns); l.addWidget(self.runtime_status)
+        if self.debug:
+            l.addWidget(QLabel(f"Diagnostics: install={self.install_root} cache={self.cache_edit.text()} temp={self.temp_edit.text()}"))
         self.stack.addWidget(w)
 
     def _set_stage(self, stage_id: str, status: str, current: int, total: int, message: str):
@@ -157,9 +226,62 @@ class InstallerWindow(QMainWindow):
         bar.setMaximum(max(total, 1)); bar.setValue(current)
         lbl.setText(f"{status}: {message}" if message else status)
 
+    def _set_runtime_busy(self, busy: bool):
+        self.install_btn.setEnabled(not busy)
+        self.verify_btn.setEnabled(not busy)
+        self.cancel_btn.setEnabled(busy)
+        if busy:
+            self.next_btn.setEnabled(False)
+
     def install_components(self):
         cache = Path(self.cache_edit.text()); temp = Path(self.temp_edit.text())
-        self._run_bg(lambda cb: self.core.setup_micromamba_env(cache, temp, self.cb_gpu.isChecked(), cb, self._set_stage))
+        self.runtime_verified = False
+        self.runtime_status.setText("Installing...")
+        self._set_runtime_busy(True)
+        faulthandler.dump_traceback_later(60, repeat=True, file=self._fault_file)
+
+        self.runtime_worker = RuntimeInstallWorker(self.core, cache, temp, self.cb_gpu.isChecked())
+        self.runtime_worker.sig_log.connect(self.append_log, Qt.QueuedConnection)
+        self.runtime_worker.sig_stage.connect(self._set_stage, Qt.QueuedConnection)
+        self.runtime_worker.sig_done.connect(self._on_runtime_done, Qt.QueuedConnection)
+        self.runtime_worker.start()
+
+    def cancel_install_components(self):
+        self.core.request_cancel()
+        self.runtime_status.setText("Cancelling...")
+
+    def _on_runtime_done(self, ok: bool, text: str):
+        faulthandler.cancel_dump_traceback_later()
+        self._set_runtime_busy(False)
+        if ok:
+            self.runtime_verified = True
+            self.runtime_status.setText("Installed")
+            self.next_btn.setEnabled(True)
+            self.append_log(text)
+        else:
+            if "Cancelled" in text:
+                self.runtime_status.setText("Cancelled by user")
+            else:
+                self.runtime_status.setText("Install failed")
+            self.append_log(f"ERROR: {text}")
+            QMessageBox.critical(self, "Runtime install error", f"{text}\n\nLog: {self.crash_log_path}")
+
+    def verify_components(self):
+        cache = Path(self.cache_edit.text()); temp = Path(self.temp_edit.text())
+        self.runtime_status.setText("Verifying...")
+        self._set_runtime_busy(True)
+        self.verify_worker = VerifyWorker(self.core, cache, temp)
+        self.verify_worker.sig_log.connect(self.append_log, Qt.QueuedConnection)
+        self.verify_worker.sig_done.connect(self._on_verify_done, Qt.QueuedConnection)
+        self.verify_worker.start()
+
+    def _on_verify_done(self, ok: bool, text: str):
+        self._set_runtime_busy(False)
+        self.runtime_verified = ok
+        self.runtime_status.setText("Verified" if ok else "Verification failed")
+        self.next_btn.setEnabled(ok)
+        if not ok:
+            QMessageBox.warning(self, "Verification", f"Verification failed. Re-run Install.\n\nLog: {self.crash_log_path}")
 
     def _screen_models(self):
         w = QWidget(); l = QVBoxLayout(w)
@@ -241,8 +363,8 @@ class InstallerWindow(QMainWindow):
             self.core.download_selected_models(models, cb, self._on_model_progress, self.model_cancel)
 
         self.model_worker = Worker(run)
-        self.model_worker.progress.connect(self.append_log)
-        self.model_worker.done.connect(self._on_models_done)
+        self.model_worker.progress.connect(self.append_log, Qt.QueuedConnection)
+        self.model_worker.done.connect(self._on_models_done, Qt.QueuedConnection)
         self.model_worker.start()
         self.refresh_model_buttons()
 
@@ -263,8 +385,8 @@ class InstallerWindow(QMainWindow):
 
     def _run_bg(self, fn):
         self.worker = Worker(fn)
-        self.worker.progress.connect(self.append_log)
-        self.worker.done.connect(self._on_done)
+        self.worker.progress.connect(self.append_log, Qt.QueuedConnection)
+        self.worker.done.connect(self._on_done, Qt.QueuedConnection)
         self.worker.start()
 
     def _on_done(self, ok: bool, text: str):
@@ -275,11 +397,13 @@ class InstallerWindow(QMainWindow):
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.parse_args()
+    parser.add_argument("--debug", action="store_true")
+    args = parser.parse_args()
     stream = ensure_streams()
     app = QApplication(sys.argv)
-    win = InstallerWindow()
-    stream.set_callback(lambda msg: win.log.appendPlainText(msg) if hasattr(win, "log") else None)
+    win = InstallerWindow(debug=args.debug)
+    win.install_exception_hooks()
+    stream.set_callback(lambda msg: win.append_log(msg) if hasattr(win, "append_log") else None)
     win.show()
     return app.exec()
 
