@@ -1,2 +1,9 @@
 pyinstaller>=6
 PySide6>=6.6
+huggingface_hub>=0.23
+httpx>=0.23
+filelock
+tqdm
+pyyaml
+fsspec
+typing-extensions

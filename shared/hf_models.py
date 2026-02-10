@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
-from typing import Callable, Dict, Iterable, List, Sequence
+from typing import Callable, Dict, Iterable, List
 
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
@@ -15,9 +16,18 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
-from huggingface_hub import HfApi, hf_hub_download
-
 from shared.model_catalog import CANONICAL_MODELS, ModelInfo
+
+
+def _hf_hub():
+    try:
+        mod = importlib.import_module("huggingface_hub")
+        return mod.HfApi, mod.hf_hub_download
+    except Exception as exc:
+        raise RuntimeError(
+            "huggingface_hub is required for model operations. "
+            "Please re-run Setup/Repair to install runtime dependencies."
+        ) from exc
 
 
 @dataclass
@@ -29,6 +39,7 @@ class DownloadedModel:
 
 
 def query_models(token: str | None = None) -> List[ModelInfo]:
+    HfApi, _ = _hf_hub()
     api = HfApi(token=token)
     known: Dict[str, ModelInfo] = {m.model_id: m for m in CANONICAL_MODELS}
     for model in api.list_models(author="Qwen", search="Qwen3-TTS-12Hz"):
@@ -46,7 +57,8 @@ def query_models(token: str | None = None) -> List[ModelInfo]:
     return sorted(known.values(), key=lambda x: x.model_id)
 
 
-def fetch_model_file_manifest(model_id: str, api: HfApi | None = None) -> tuple[list[str], int]:
+def fetch_model_file_manifest(model_id: str, api=None) -> tuple[list[str], int]:
+    HfApi, _ = _hf_hub()
     client = api or HfApi()
     info = client.model_info(repo_id=model_id, files_metadata=True)
     files: list[str] = []
@@ -67,6 +79,7 @@ def download_models(
     local_dir: str | None = None,
     cancel_event: Event | None = None,
 ) -> List[DownloadedModel]:
+    HfApi, hf_hub_download = _hf_hub()
     downloaded: List[DownloadedModel] = []
     api = HfApi()
 

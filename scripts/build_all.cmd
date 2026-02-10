@@ -88,7 +88,7 @@ mkdir "%STAGE_DIR%" || exit /b 1
 
 if "%SKIP_SETUP%"=="0" (
   echo [INFO] Building Setup into stage...
-  "%VENV_PY%" -m PyInstaller --noconfirm --windowed --name Qwen3GUI-Setup --workpath "build\setup" --distpath "%STAGE_DIR%" --contents-directory _setup --add-data "requirements_runtime.txt;." --add-data "shared\runtime_backend.py;shared" --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets %PYI_DEBUG% installer\installer_app.py || exit /b 1
+  "%VENV_PY%" -m PyInstaller --noconfirm --windowed --name Qwen3GUI-Setup --workpath "build\setup" --distpath "%STAGE_DIR%" --contents-directory _setup --add-data "requirements_runtime.txt;." --add-data "shared\runtime_backend.py;shared" --hidden-import PySide6 --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtWidgets --hidden-import huggingface_hub --collect-submodules huggingface_hub %PYI_DEBUG% installer\installer_app.py || exit /b 1
   call :flatten "Qwen3GUI-Setup" "%SETUP_EXE%" "%SETUP_CONTENT%" "%SETUP_STAGE%" "_setup" || exit /b 1
   if not exist "%SETUP_CONTENT%\requirements_runtime.txt" (
     echo [ERROR] Missing setup packaged requirements: %SETUP_CONTENT%\requirements_runtime.txt
@@ -96,6 +96,12 @@ if "%SKIP_SETUP%"=="0" (
   )
   if not exist "%SETUP_CONTENT%\shared\runtime_backend.py" (
     echo [ERROR] Missing setup packaged backend script: %SETUP_CONTENT%\shared\runtime_backend.py
+    exit /b 1
+  )
+  echo [INFO] Setup smoke imports...
+  "%SETUP_EXE%" --smoke-imports
+  if not "%ERRORLEVEL%"=="0" (
+    echo [ERROR] Setup smoke imports failed
     exit /b 1
   )
 )

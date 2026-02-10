@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import faulthandler
 import sys
 import traceback
@@ -32,6 +33,17 @@ from PySide6.QtWidgets import (
 from installer.gui_stream import ensure_streams
 from installer.installer_core import InstallerCore
 from shared.settings_store import load_json, save_json
+
+
+def run_smoke_imports() -> int:
+    try:
+        mod = importlib.import_module("huggingface_hub")
+        ver = getattr(mod, "__version__", "unknown")
+        print(f"huggingface_hub={ver}")
+        return 0
+    except Exception as exc:
+        print(f"smoke-imports failed: {exc}")
+        return 1
 
 
 class Worker(QThread):
@@ -468,7 +480,10 @@ class InstallerWindow(QMainWindow):
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--smoke-imports", action="store_true")
     args = parser.parse_args()
+    if args.smoke_imports:
+        return run_smoke_imports()
     stream = ensure_streams()
     app = QApplication(sys.argv)
     win = InstallerWindow(debug=args.debug)
