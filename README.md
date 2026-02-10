@@ -52,10 +52,11 @@ Qwen3TTS Windows Suite — это набор из двух Windows-прилож�
 
 ## RU — Сборка из исходников
 ```bat
-build_all.cmd --clean
+scripts\build_all.cmd --clean
 ```
 
-Скрипт `build_all.cmd` создаёт изолированное окружение `.build_venv_release`, ставит зависимости из `requirements_build.txt` и последовательно собирает Setup/App/Remove.
+Скрипт `scripts\build_all.cmd` создаёт изолированное окружение `.build_venv_release`, ставит зависимости из `requirements_build.txt` и последовательно собирает Setup/App/Remove.
+- корневой `build_all.cmd` — тонкий враппер, который вызывает `scripts\build_all.cmd`.
 
 Разделение зависимостей:
 - `requirements_build.txt` — единый набор зависимостей для сборки всех GUI exe.
@@ -144,11 +145,12 @@ Qwen3TTS Windows Suite is a pair of Windows apps for non-technical users:
 
 ## EN — Build from source
 ```bat
-build_all.cmd --clean
+scripts\build_all.cmd --clean
 ```
-- Unified build: `build_all.cmd --clean` creates `dist\Qwen3GUI\` with `Qwen3GUI-Setup.exe`, `Qwen3GUI.exe`, `Qwen3GUI-Remove.exe` and separate onedir content folders `_setup`, `_app`, `_remove`.
+- Unified build: `scripts\build_all.cmd --clean` creates `dist\Qwen3GUI\` with `Qwen3GUI-Setup.exe`, `Qwen3GUI.exe`, `Qwen3GUI-Remove.exe` and separate onedir content folders `_setup`, `_app`, `_remove`.
 
-`build_all.cmd` creates a single isolated venv `.build_venv_release`, installs dependencies from `requirements_build.txt`, and builds Setup/App/Remove in one run.
+`scripts\build_all.cmd` creates a single isolated venv `.build_venv_release`, installs dependencies from `requirements_build.txt`, and builds Setup/App/Remove in one run.
+- root `build_all.cmd` is a thin wrapper that forwards to `scripts\build_all.cmd`.
 
 Dependency split:
 - `requirements_build.txt` contains unified GUI/build dependencies for all executables.
