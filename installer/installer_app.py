@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from installer.gui_stream import ensure_streams
 from installer.installer_core import InstallerCore
+from shared.settings_store import load_json, save_json
 
 
 class Worker(QThread):
@@ -87,6 +88,25 @@ class VerifyWorker(QThread):
             self.sig_done.emit(False, str(exc))
 
 
+class ModelDownloadWorker(QThread):
+    sig_log = Signal(str)
+    sig_model_progress = Signal(str, int, int, str)
+    sig_done = Signal(bool, str)
+
+    def __init__(self, core: InstallerCore, model_ids: list[str], cancel_event: Event):
+        super().__init__()
+        self.core = core
+        self.model_ids = model_ids
+        self.cancel_event = cancel_event
+
+    def run(self):
+        try:
+            self.core.download_selected_models(self.model_ids, self.sig_log.emit, self.sig_model_progress.emit, self.cancel_event)
+            self.sig_done.emit(True, "Done")
+        except Exception as exc:
+            self.sig_done.emit(False, str(exc))
+
+
 class InstallerWindow(QMainWindow):
     def __init__(self, debug: bool = False):
         super().__init__()
@@ -94,7 +114,11 @@ class InstallerWindow(QMainWindow):
         self.setWindowTitle("Qwen3TTS Installer")
         self.resize(1040, 760)
 
-        self.install_root = Path.cwd()
+        self.app_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path.cwd()
+        self.path_settings_path = self.app_dir / "installer_settings.json"
+        self.path_settings = load_json(self.path_settings_path, default={})
+
+        self.install_root = Path(self.path_settings.get("install_root") or self.app_dir)
         self.core = InstallerCore(self.install_root)
         self.model_cancel = Event()
         self.model_states: dict[str, dict] = {}
@@ -132,6 +156,7 @@ class InstallerWindow(QMainWindow):
                 self.core.log(t)
                 with self.crash_log_path.open("a", encoding="utf-8") as f:
                     f.write(t + "\n")
+                    f.flush()
 
     def _pick_dir(self, edit: QLineEdit):
         folder = QFileDialog.getExistingDirectory(self, "Select folder", edit.text() or str(Path.home()))
@@ -162,7 +187,13 @@ class InstallerWindow(QMainWindow):
 
     def _screen_paths(self):
         w = QWidget(); form = QFormLayout(w)
-        self.install_edit = QLineEdit(str(self.install_root)); self.cache_edit = QLineEdit(str(self.install_root / "cache")); self.temp_edit = QLineEdit(str(self.install_root / "_tmp"))
+        def_install = self.path_settings.get("install_root", str(self.install_root))
+        def_cache = self.path_settings.get("cache_root", str(self.install_root / "cache"))
+        def_temp = self.path_settings.get("temp_root", str(self.install_root / "_tmp"))
+        self.install_edit = QLineEdit(def_install)
+        self.cache_edit = QLineEdit(def_cache)
+        self.temp_edit = QLineEdit(def_temp)
+
         for edit in [self.install_edit, self.cache_edit, self.temp_edit]:
             row = QHBoxLayout(); row.addWidget(edit); b = QPushButton("Browse"); b.clicked.connect(lambda _, e=edit: self._pick_dir(e)); row.addWidget(b)
             box = QWidget(); box.setLayout(row)
@@ -172,9 +203,18 @@ class InstallerWindow(QMainWindow):
         self.stack.addWidget(w)
 
     def _to_hw(self):
-        self.install_root = Path(self.install_edit.text()); self.core = InstallerCore(self.install_root)
+        self.install_root = Path(self.install_edit.text())
+        cache_root = Path(self.cache_edit.text())
+        temp_root = Path(self.temp_edit.text())
+        for path in [self.install_root, cache_root, temp_root]:
+            path.mkdir(parents=True, exist_ok=True)
+        self.path_settings.update({"install_root": str(self.install_root), "cache_root": str(cache_root), "temp_root": str(temp_root)})
+        save_json(self.path_settings_path, self.path_settings)
+
+        self.core = InstallerCore(self.install_root)
         self.crash_log_path = self.core.logs_dir / "installer_runtime_page.log"
-        self.stack.setCurrentIndex(2); self.hw_summary.setText("Click Refresh")
+        self.stack.setCurrentIndex(2)
+        self.hw_summary.setText("Click Refresh")
 
     def _screen_hw(self):
         w = QWidget(); l = QVBoxLayout(w)
@@ -259,10 +299,7 @@ class InstallerWindow(QMainWindow):
             self.next_btn.setEnabled(True)
             self.append_log(text)
         else:
-            if "Cancelled" in text:
-                self.runtime_status.setText("Cancelled by user")
-            else:
-                self.runtime_status.setText("Install failed")
+            self.runtime_status.setText("Cancelled by user" if "Cancelled" in text else "Install failed")
             self.append_log(f"ERROR: {text}")
             QMessageBox.critical(self, "Runtime install error", f"{text}\n\nLog: {self.crash_log_path}")
 
@@ -285,94 +322,127 @@ class InstallerWindow(QMainWindow):
 
     def _screen_models(self):
         w = QWidget(); l = QVBoxLayout(w)
-        self.model_overall = QProgressBar(); self.model_overall.setFormat("Overall %p%")
+        self.model_overall = QProgressBar(); self.model_overall.setRange(0, 100); self.model_overall.setFormat("Overall %p%")
         self.model_list = QListWidget()
         self.model_detail = QLabel("No models selected")
         load_btn = QPushButton("Load models from Hugging Face"); load_btn.clicked.connect(self.load_models)
         self.dl_btn = QPushButton("Download selected"); self.dl_btn.clicked.connect(self.download_models)
-        self.skip_btn = QPushButton("Skip for now"); self.skip_btn.clicked.connect(self.skip_or_continue)
+        self.skip_btn = QPushButton("Skip for now"); self.skip_btn.clicked.connect(self.on_right_button)
         l.addWidget(load_btn); l.addWidget(self.model_list); l.addWidget(self.model_overall); l.addWidget(self.model_detail)
         r = QHBoxLayout(); r.addWidget(self.dl_btn); r.addWidget(self.skip_btn); l.addLayout(r)
         self.stack.addWidget(w)
 
-    def _state_for(self) -> str:
-        selected = [self.model_list.item(i).text() for i in range(self.model_list.count()) if self.model_list.item(i).checkState() == Qt.Checked]
-        if hasattr(self, "model_worker") and self.model_worker.isRunning():
-            return "M1"
-        if not selected:
-            return "M0"
-        statuses = [self.model_states.get(mid, {}).get("status", "NotInstalled") for mid in selected]
-        if all(s == "Installed" for s in statuses):
-            return "M2"
-        if any(s == "Installed" for s in statuses):
-            return "M3"
-        return "M0"
+    def _selected_models(self) -> list[str]:
+        return [self.model_list.item(i).text() for i in range(self.model_list.count()) if self.model_list.item(i).checkState() == Qt.Checked]
+
+    def _missing_selected_models(self) -> list[str]:
+        return [mid for mid in self._selected_models() if self.model_states.get(mid, {}).get("status") not in {"Installed"}]
+
+    def _has_failed_selected(self) -> bool:
+        return any(self.model_states.get(mid, {}).get("status") == "Failed" for mid in self._selected_models())
+
+    def _is_downloading(self) -> bool:
+        return hasattr(self, "model_worker") and self.model_worker.isRunning()
 
     def refresh_model_buttons(self):
-        state = self._state_for()
-        selected = [self.model_list.item(i).text() for i in range(self.model_list.count()) if self.model_list.item(i).checkState() == Qt.Checked]
-        has_missing = any(self.model_states.get(mid, {}).get("status") != "Installed" for mid in selected)
-        self.dl_btn.setEnabled(bool(selected) and has_missing and state != "M1")
-        if state == "M1":
-            self.skip_btn.setText("Cancel downloads & Continue")
-        elif not selected or not has_missing:
-            self.skip_btn.setText("Continue")
-        else:
-            self.skip_btn.setText("Skip for now")
+        downloading = self._is_downloading()
+        selected = self._selected_models()
+        missing = self._missing_selected_models()
+        all_selected_installed = bool(selected) and len(missing) == 0
 
-    def skip_or_continue(self):
-        if hasattr(self, "model_worker") and self.model_worker.isRunning():
+        self.dl_btn.setEnabled((not downloading) and bool(selected) and bool(missing))
+        self.model_list.setEnabled(not downloading)
+
+        if downloading:
+            self.skip_btn.setText("Cancel downloads")
+            self.skip_btn.setEnabled(True)
+        else:
+            if all_selected_installed and not self._has_failed_selected():
+                self.skip_btn.setText("Continue")
+            elif not selected:
+                self.skip_btn.setText("Skip for now")
+            elif self._has_failed_selected():
+                self.skip_btn.setText("Skip for now")
+            elif missing:
+                self.skip_btn.setText("Skip for now")
+            else:
+                self.skip_btn.setText("Continue")
+            self.skip_btn.setEnabled(True)
+
+    def on_right_button(self):
+        if self._is_downloading():
             self.model_cancel.set()
-            self.model_worker.wait(15000)
-        self.stack.setCurrentIndex(5)
+            self.skip_btn.setEnabled(False)
+            self.model_detail.setText("Cancelling downloads...")
+            return
+        if self.skip_btn.text() == "Continue" or self.skip_btn.text() == "Skip for now":
+            self.stack.setCurrentIndex(5)
 
     def load_models(self):
         self.model_list.clear(); self.model_states.clear()
+        installed = set(self.core.installed_model_ids())
         for model in self.core.get_models():
             item = QListWidgetItem(model); item.setCheckState(Qt.Unchecked)
             self.model_list.addItem(item)
-            self.model_states[model] = {"status": "NotInstalled", "bytes_done": 0, "bytes_total": 1, "error_message": ""}
+            state = "Installed" if model in installed else "NotInstalled"
+            self.model_states[model] = {"status": state, "bytes_done": 0, "bytes_total": 1, "error_message": ""}
         self.model_list.itemChanged.connect(lambda *_: self.refresh_model_buttons())
+        self.model_detail.setText("Models loaded")
+        self._update_overall_model_progress()
         self.refresh_model_buttons()
+
+    def _update_overall_model_progress(self):
+        selected = self._selected_models()
+        if not selected:
+            self.model_overall.setValue(0)
+            return
+        total_bytes = sum(max(int(self.model_states.get(mid, {}).get("bytes_total", 1)), 1) for mid in selected)
+        done_bytes = sum(int(self.model_states.get(mid, {}).get("bytes_done", 0)) for mid in selected)
+        percent = int((done_bytes * 100) / total_bytes) if total_bytes else 0
+        self.model_overall.setValue(max(0, min(percent, 100)))
 
     def _on_model_progress(self, model_id: str, current: int, total: int, message: str):
         st = self.model_states.setdefault(model_id, {"status": "NotInstalled", "bytes_done": 0, "bytes_total": 1, "error_message": ""})
-        st["bytes_done"] = current; st["bytes_total"] = max(total, 1)
+        st["bytes_done"] = max(int(current), 0)
+        st["bytes_total"] = max(int(total), 1)
         if message == "Done":
             st["status"] = "Installed"
+            st["bytes_done"] = st["bytes_total"]
         elif "Cancelled" in message:
             st["status"] = "Cancelled"
         elif "ERROR" in message:
             st["status"] = "Failed"; st["error_message"] = message
         else:
             st["status"] = "Downloading"
-        totals = [v.get("bytes_total", 1) for v in self.model_states.values()]
-        done = [v.get("bytes_done", 0) for v in self.model_states.values()]
-        self.model_overall.setMaximum(max(sum(totals), 1)); self.model_overall.setValue(sum(done))
-        self.model_detail.setText(f"{model_id}: {st['status']} ({current}/{max(total,1)})")
+        self._update_overall_model_progress()
+        self.model_detail.setText(f"{model_id}: {st['status']} ({st['bytes_done']} / {st['bytes_total']} bytes)")
         self.refresh_model_buttons()
 
     def download_models(self):
-        models = [self.model_list.item(i).text() for i in range(self.model_list.count()) if self.model_list.item(i).checkState() == Qt.Checked and self.model_states.get(self.model_list.item(i).text(), {}).get("status") != "Installed"]
+        models = self._missing_selected_models()
         if not models:
             QMessageBox.information(self, "Models", "Select at least one missing model")
             return
         self.model_cancel.clear()
-
-        def run(cb):
-            self.core.download_selected_models(models, cb, self._on_model_progress, self.model_cancel)
-
-        self.model_worker = Worker(run)
-        self.model_worker.progress.connect(self.append_log, Qt.QueuedConnection)
-        self.model_worker.done.connect(self._on_models_done, Qt.QueuedConnection)
-        self.model_worker.start()
+        self.model_detail.setText("Downloading selected models...")
         self.refresh_model_buttons()
+
+        self.model_worker = ModelDownloadWorker(self.core, models, self.model_cancel)
+        self.model_worker.sig_log.connect(self.append_log, Qt.QueuedConnection)
+        self.model_worker.sig_model_progress.connect(self._on_model_progress, Qt.QueuedConnection)
+        self.model_worker.sig_done.connect(self._on_models_done, Qt.QueuedConnection)
+        self.model_worker.start()
 
     def _on_models_done(self, ok: bool, text: str):
         if self.model_cancel.is_set():
-            for s in self.model_states.values():
-                if s.get("status") == "Downloading":
-                    s["status"] = "Cancelled"
+            for mid in self._selected_models():
+                if self.model_states.get(mid, {}).get("status") == "Downloading":
+                    self.model_states[mid]["status"] = "Cancelled"
+            self.model_detail.setText("Downloads cancelled")
+        elif ok:
+            self.model_detail.setText("Downloads finished")
+        else:
+            self.model_detail.setText(f"Download error: {text}")
         self.append_log(text if ok else f"ERROR: {text}")
         self.refresh_model_buttons()
 

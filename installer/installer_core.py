@@ -333,6 +333,20 @@ class InstallerCore:
     def get_models(self) -> List[str]:
         return [m.model_id for m in query_models()]
 
+    def installed_model_ids(self) -> List[str]:
+        cache_raw = str(self.settings.get("cache_root", "")).strip()
+        if not cache_raw:
+            return []
+        hub = Path(cache_raw) / "huggingface" / "hub"
+        if not hub.exists():
+            return []
+        installed: list[str] = []
+        for model in self.get_models():
+            tag = "models--" + model.replace("/", "--")
+            if any(p.name.startswith(tag) for p in hub.iterdir()):
+                installed.append(model)
+        return installed
+
     def download_selected_models(self, model_ids: List[str], status_cb: Callable[[str], None], model_progress_cb: Callable[[str, int, int, str], None] | None = None, cancel_event: Event | None = None) -> None:
         cache_raw = str(self.settings.get("cache_root", "")).strip()
         if not cache_raw:
