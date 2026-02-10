@@ -5,9 +5,12 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
+from collections import deque
 from pathlib import Path
-from threading import Event
+from queue import Empty, Queue
+from threading import Event, Thread
 from typing import Callable, List, Optional, Tuple
 
 from shared.app_paths import debug_resource_roots, get_internal_dir, get_shared_dir
@@ -19,6 +22,9 @@ from shared.runtime_config import save_runtime_config
 from shared.settings_store import load_json, save_json
 
 StageCb = Callable[[str, str, int, int, str], None] | None
+
+class CommandRunError(RuntimeError):
+    pass
 
 
 class InstallerCore:
@@ -51,14 +57,7 @@ class InstallerCore:
         self.cancel_event.set()
         proc = self._current_proc
         if proc and proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=2)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+            self._terminate_process_tree(proc)
 
     def clear_cancel(self) -> None:
         self.cancel_event.clear()
@@ -72,13 +71,40 @@ class InstallerCore:
         self.log(f"resource_check requirements_runtime={req}")
         self.log(f"resource_check runtime_backend={backend}")
 
-    def _run_command(self, cmd: List[str], status_cb: Callable[[str], None] | None = None, label: str = "command", attempts: int = 1) -> subprocess.CompletedProcess:
+    def _terminate_process_tree(self, proc: subprocess.Popen) -> None:
+        if proc.poll() is not None:
+            return
+        if sys.platform.startswith("win"):
+            try:
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, text=True, check=False)
+            except Exception:
+                pass
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def _run_command(
+        self,
+        cmd: List[str],
+        status_cb: Callable[[str], None] | None = None,
+        label: str = "command",
+        attempts: int = 1,
+        idle_timeout_s: int = 600,
+        hard_timeout_s: int | None = None,
+    ) -> subprocess.CompletedProcess:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         last = subprocess.CompletedProcess(cmd, 1, "", "")
+
         for attempt in range(1, attempts + 1):
             if self.cancel_event.is_set():
                 raise RuntimeError("Cancelled by user")
             self._emit(status_cb, f"Attempt {attempt}/{attempts}: {label}")
+
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -88,31 +114,79 @@ class InstallerCore:
                 creationflags=creationflags,
             )
             self._current_proc = proc
-            out_lines: list[str] = []
-            try:
-                if proc.stdout is not None:
+            q: Queue[str] = Queue()
+            tail: deque[str] = deque(maxlen=200)
+            output: list[str] = []
+
+            def _reader() -> None:
+                try:
+                    if proc.stdout is None:
+                        return
                     for raw in iter(proc.stdout.readline, ""):
                         if not raw:
                             break
-                        line = raw.rstrip("\n")
-                        out_lines.append(line)
-                        self._emit(status_cb, f"[{label}] {line}")
-                        if self.cancel_event.is_set():
-                            self._emit(status_cb, f"[{label}] cancellation requested")
-                            try:
-                                proc.terminate()
-                                proc.wait(timeout=2)
-                            except Exception:
-                                proc.kill()
-                            return subprocess.CompletedProcess(cmd, 130, "\n".join(out_lines), "cancelled")
+                        q.put(raw.rstrip("\n"))
+                finally:
+                    q.put("__EOF__")
+
+            t = Thread(target=_reader, daemon=True)
+            t.start()
+            started = time.monotonic()
+            last_output = started
+            eof = False
+
+            try:
+                while True:
+                    if self.cancel_event.is_set():
+                        self._emit(status_cb, f"[{label}] cancellation requested")
+                        self._terminate_process_tree(proc)
+                        raise RuntimeError(f"{label}: cancelled by user")
+
+                    now = time.monotonic()
+                    if hard_timeout_s is not None and (now - started) > hard_timeout_s:
+                        self._terminate_process_tree(proc)
+                        raise CommandRunError(
+                            f"{label}: hard timeout after {hard_timeout_s}s. Last output:\n" + "\n".join(tail)
+                        )
+                    if idle_timeout_s is not None and (now - last_output) > idle_timeout_s:
+                        self._terminate_process_tree(proc)
+                        raise CommandRunError(
+                            f"{label}: No output for {idle_timeout_s} seconds (idle timeout). Last output:\n" + "\n".join(tail)
+                        )
+
+                    try:
+                        item = q.get(timeout=0.2)
+                    except Empty:
+                        if eof and proc.poll() is not None:
+                            break
+                        continue
+
+                    if item == "__EOF__":
+                        eof = True
+                        if proc.poll() is not None:
+                            break
+                        continue
+
+                    last_output = time.monotonic()
+                    output.append(item)
+                    tail.append(item)
+                    self._emit(status_cb, f"[{label}] {item}")
+
+                    if eof and proc.poll() is not None:
+                        break
+
                 rc = proc.wait()
             finally:
                 self._current_proc = None
-            stdout = "\n".join(out_lines)
+
+            stdout = "\n".join(output)
             last = subprocess.CompletedProcess(cmd, rc, stdout, "")
             if rc == 0:
                 return last
             self._emit(status_cb, f"[{label}] failed with code {rc}")
+            if tail:
+                self._emit(status_cb, f"[{label}] last output tail:\n" + "\n".join(tail))
+
         return last
 
     def resolve_requirements_runtime_path(self) -> Path:
@@ -211,7 +285,7 @@ class InstallerCore:
         env_pre = env_path.exists()
         self._stage(stage_cb, "B2", "running", 0, 100, "Creating/updating runtime env")
         create_cmd = [str(mm_exe), "create", "-y", "-p", str(env_path), "python=3.11", "pip", "ffmpeg", "pyside6", "libsndfile"]
-        create_res = self._run_command(create_cmd, status_cb=status_cb, label="micromamba-create", attempts=2)
+        create_res = self._run_command(create_cmd, status_cb=status_cb, label="micromamba-create", attempts=2, idle_timeout_s=600, hard_timeout_s=None)
         if create_res.returncode != 0:
             self._stage(stage_cb, "B2", "failed", 0, 100, "micromamba create failed")
             if create_res.returncode == 130:
@@ -221,14 +295,14 @@ class InstallerCore:
 
         pip_base = [str(mm_exe), "run", "-p", str(env_path), "python", "-m", "pip"]
         self._stage(stage_cb, "C1", "running", 0, 100, "Upgrading pip")
-        p1 = self._run_command(pip_base + ["install", "--upgrade", "pip"], status_cb=status_cb, label="pip-upgrade", attempts=2)
+        p1 = self._run_command(pip_base + ["install", "--upgrade", "pip"], status_cb=status_cb, label="pip-upgrade", attempts=2, idle_timeout_s=600, hard_timeout_s=None)
         if p1.returncode != 0:
             self._stage(stage_cb, "C1", "failed", 0, 100, "pip upgrade failed")
             raise RuntimeError("Failed to upgrade pip inside runtime environment.")
         self._stage(stage_cb, "C1", "done", 100, 100, "Pip ready")
 
         self._stage(stage_cb, "C2", "running", 0, 100, "Installing runtime requirements")
-        p2 = self._run_command(pip_base + ["install", "-r", str(runtime_req)], status_cb=status_cb, label="pip-runtime-req", attempts=2)
+        p2 = self._run_command(pip_base + ["install", "-r", str(runtime_req)], status_cb=status_cb, label="pip-runtime-req", attempts=2, idle_timeout_s=600, hard_timeout_s=None)
         if p2.returncode != 0:
             self._stage(stage_cb, "C2", "failed", 0, 100, "requirements install failed")
             raise RuntimeError("Failed to install requirements_runtime.txt")
@@ -236,10 +310,10 @@ class InstallerCore:
 
         status_cb("Installing torch/runtime acceleration packages...")
         torch_cmd = pip_base + (["install", "torch", "onnxruntime-gpu"] if enable_gpu else ["install", "torch", "onnxruntime", "--index-url", "https://download.pytorch.org/whl/cpu"])
-        t = self._run_command(torch_cmd, status_cb=status_cb, label="pip-torch-optimized", attempts=2)
+        t = self._run_command(torch_cmd, status_cb=status_cb, label="pip-torch-optimized", attempts=2, idle_timeout_s=600, hard_timeout_s=None)
         if t.returncode != 0:
             status_cb("GPU/CPU optimized package set failed, using generic fallback...")
-            fallback = self._run_command(pip_base + ["install", "torch", "onnxruntime"], status_cb=status_cb, label="pip-torch-fallback", attempts=1)
+            fallback = self._run_command(pip_base + ["install", "torch", "onnxruntime"], status_cb=status_cb, label="pip-torch-fallback", attempts=1, idle_timeout_s=600, hard_timeout_s=None)
             if fallback.returncode != 0:
                 raise RuntimeError("Failed to install torch/onnxruntime runtime packages.")
 
@@ -284,7 +358,7 @@ class InstallerCore:
         if not mm_exe.exists():
             status_cb(f"FAIL: micromamba missing at {mm_exe}")
             return False
-        if self._run_command([str(mm_exe), "--version"], status_cb=status_cb, label="verify-micromamba", attempts=1).returncode != 0:
+        if self._run_command([str(mm_exe), "--version"], status_cb=status_cb, label="verify-micromamba", attempts=1, idle_timeout_s=120, hard_timeout_s=300).returncode != 0:
             return False
 
         status_cb("Verify: checking runtime env...")

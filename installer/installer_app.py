@@ -137,7 +137,7 @@ class InstallerWindow(QMainWindow):
         self.runtime_verified = False
 
         self.stack = QStackedWidget()
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True)
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(5000)
 
         root = QWidget(); lay = QVBoxLayout(root)
         lay.addWidget(self.stack, 4)
@@ -290,7 +290,7 @@ class InstallerWindow(QMainWindow):
         self.runtime_verified = False
         self.runtime_status.setText("Installing...")
         self._set_runtime_busy(True)
-        faulthandler.dump_traceback_later(60, repeat=True, file=self._fault_file)
+        faulthandler.dump_traceback_later(600, repeat=False, file=self._fault_file)
 
         self.runtime_worker = RuntimeInstallWorker(self.core, cache, temp, self.cb_gpu.isChecked())
         self.runtime_worker.sig_log.connect(self.append_log, Qt.QueuedConnection)

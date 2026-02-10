@@ -4,6 +4,7 @@ import importlib
 import os
 import sys
 import traceback
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -90,6 +91,7 @@ def download_models(
             files, total = fetch_model_file_manifest(model_id=model_id, api=api)
             done = 0
             target_dir = local_dir
+            last_emit = 0.0
             if progress_cb:
                 progress_cb(model_id, done, max(total, 1), "Preparing download")
 
@@ -107,8 +109,10 @@ def download_models(
                 )
                 file_size = Path(local_file).stat().st_size if Path(local_file).exists() else 0
                 done = min(done + file_size, max(total, 1))
-                if progress_cb:
+                now = time.monotonic()
+                if progress_cb and ((now - last_emit) >= 0.2 or done >= max(total, 1)):
                     progress_cb(model_id, done, max(total, 1), filename)
+                    last_emit = now
 
             downloaded.append(
                 DownloadedModel(
