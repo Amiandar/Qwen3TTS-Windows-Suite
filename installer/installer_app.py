@@ -84,6 +84,7 @@ class RuntimeInstallWorker(QThread):
 
 class VerifyWorker(QThread):
     sig_log = Signal(str)
+    sig_stage = Signal(str, str, int, int, str)
     sig_done = Signal(bool, str)
 
     def __init__(self, core: InstallerCore, cache: Path, temp: Path):
@@ -94,8 +95,9 @@ class VerifyWorker(QThread):
 
     def run(self):
         try:
-            ok = self.core.verify_runtime_installation(self.cache, self.temp, self.sig_log.emit)
-            self.sig_done.emit(ok, "Verified" if ok else "Verification failed")
+            results = self.core.verify_all_components(self.cache, self.temp, self.sig_log.emit, self.sig_stage.emit)
+            ok = all(v.get("state") == "done" for v in results.values())
+            self.sig_done.emit(ok, "Verification completed: OK" if ok else "Verification completed: issues found")
         except Exception as exc:
             self.sig_done.emit(False, str(exc))
 
@@ -271,11 +273,25 @@ class InstallerWindow(QMainWindow):
             l.addWidget(QLabel(f"Diagnostics: install={self.install_root} cache={self.cache_edit.text()} temp={self.temp_edit.text()}"))
         self.stack.addWidget(w)
 
+
+    def _apply_stage_style(self, bar: QProgressBar, state: str):
+        colors = {
+            "pending": "#666",
+            "running": "#3b82f6",
+            "done": "#22c55e",
+            "missing": "#f59e0b",
+            "failed": "#ef4444",
+            "skipped": "#94a3b8",
+        }
+        c = colors.get(state.lower(), "#666")
+        bar.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+
     def _set_stage(self, stage_id: str, status: str, current: int, total: int, message: str):
         if stage_id not in self.stage_rows:
             return
         bar, lbl = self.stage_rows[stage_id]
         bar.setMaximum(max(total, 1)); bar.setValue(current)
+        self._apply_stage_style(bar, status)
         lbl.setText(f"{status}: {message}" if message else status)
 
     def _set_runtime_busy(self, busy: bool):
@@ -321,16 +337,15 @@ class InstallerWindow(QMainWindow):
         self._set_runtime_busy(True)
         self.verify_worker = VerifyWorker(self.core, cache, temp)
         self.verify_worker.sig_log.connect(self.append_log, Qt.QueuedConnection)
+        self.verify_worker.sig_stage.connect(self._set_stage, Qt.QueuedConnection)
         self.verify_worker.sig_done.connect(self._on_verify_done, Qt.QueuedConnection)
         self.verify_worker.start()
 
     def _on_verify_done(self, ok: bool, text: str):
         self._set_runtime_busy(False)
         self.runtime_verified = ok
-        self.runtime_status.setText("Verified" if ok else "Verification failed")
+        self.runtime_status.setText(text)
         self.next_btn.setEnabled(ok)
-        if not ok:
-            QMessageBox.warning(self, "Verification", f"Verification failed. Re-run Install.\n\nLog: {self.crash_log_path}")
 
     def _screen_models(self):
         w = QWidget(); l = QVBoxLayout(w)
@@ -454,7 +469,9 @@ class InstallerWindow(QMainWindow):
         elif ok:
             self.model_detail.setText("Downloads finished")
         else:
-            self.model_detail.setText(f"Download error: {text}")
+            tail = text.splitlines()[-30:]
+            self.model_detail.setText("Download error (see log)")
+            self.append_log("Download failed details:\n" + "\n".join(tail))
         self.append_log(text if ok else f"ERROR: {text}")
         self.refresh_model_buttons()
 

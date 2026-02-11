@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -382,6 +383,95 @@ class InstallerCore:
             status_cb("WARN: free disk space below 5 GB")
         status_cb("Verify: OK" if ok else "Verify: FAIL")
         return ok
+
+
+    def verify_all_components(
+        self,
+        cache_root: Path,
+        temp_root: Path,
+        status_cb: Callable[[str], None],
+        stage_cb: StageCb | None = None,
+    ) -> dict[str, dict[str, object]]:
+        self.clear_cancel()
+        apply_runtime_env(cache_root=cache_root, temp_root=temp_root)
+        mm_exe = self.install_root / "tools" / "micromamba.exe"
+        env_path = self.install_root / "envs" / "qwen3-tts"
+        results: dict[str, dict[str, object]] = {}
+
+        def mark(stage: str, state: str, message: str, details: str = "", recoverable: bool = True):
+            results[stage] = {"state": state, "message": message, "details": details, "recoverable": recoverable}
+            pct = 100 if state == "done" else 0
+            self._stage(stage_cb, stage, state, pct, 100, message)
+            status_cb(f"verify[{stage}] {state}: {message}")
+
+        # B1 micromamba
+        self._stage(stage_cb, "B1", "running", 0, 100, "Checking micromamba")
+        if not mm_exe.exists():
+            mark("B1", "missing", f"micromamba not found: {mm_exe}")
+        else:
+            r = self._run_command([str(mm_exe), "--version"], status_cb=status_cb, label="verify-micromamba", attempts=1, idle_timeout_s=120, hard_timeout_s=300)
+            mark("B1", "done" if r.returncode == 0 else "failed", "micromamba OK" if r.returncode == 0 else "micromamba failed")
+
+        # B2 env exists + python
+        self._stage(stage_cb, "B2", "running", 0, 100, "Checking runtime env")
+        if not env_path.exists():
+            mark("B2", "missing", f"env missing: {env_path}")
+        else:
+            rp = self._run_command([str(mm_exe), "run", "-p", str(env_path), "python", "--version"], status_cb=status_cb, label="verify-python", attempts=1, idle_timeout_s=120, hard_timeout_s=300)
+            mark("B2", "done" if rp.returncode == 0 else "failed", "runtime python OK" if rp.returncode == 0 else "runtime python failed")
+
+        # B3 cache/temp redirects
+        self._stage(stage_cb, "B3", "running", 0, 100, "Checking cache/temp redirects")
+        expected = apply_runtime_env(cache_root=cache_root, temp_root=temp_root)
+        mismatches = []
+        for key in ("HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE", "TEMP", "TMP"):
+            val = os.environ.get(key, "")
+            if val != expected.get(key, ""):
+                mismatches.append(f"{key}={val} expected={expected.get(key, '')}")
+        if mismatches:
+            mark("B3", "missing", "redirects mismatch", details="; ".join(mismatches))
+        else:
+            mark("B3", "done", "cache/temp redirects configured")
+
+        # C1 pip bootstrap
+        self._stage(stage_cb, "C1", "running", 0, 100, "Checking pip")
+        if env_path.exists():
+            r = self._run_command([str(mm_exe), "run", "-p", str(env_path), "python", "-m", "pip", "--version"], status_cb=status_cb, label="verify-pip", attempts=1, idle_timeout_s=120, hard_timeout_s=300)
+            mark("C1", "done" if r.returncode == 0 else "failed", "pip OK" if r.returncode == 0 else "pip failed")
+        else:
+            mark("C1", "missing", "runtime env missing")
+
+        # C2 runtime requirements
+        self._stage(stage_cb, "C2", "running", 0, 100, "Checking runtime requirements")
+        if env_path.exists():
+            r = self._run_command([str(mm_exe), "run", "-p", str(env_path), "python", "-c", "import torch, transformers"], status_cb=status_cb, label="verify-runtime-req", attempts=1, idle_timeout_s=120, hard_timeout_s=300)
+            mark("C2", "done" if r.returncode == 0 else "missing", "runtime requirements present" if r.returncode == 0 else "runtime requirements missing")
+        else:
+            mark("C2", "missing", "runtime env missing")
+
+        # C3 smoke imports
+        self._stage(stage_cb, "C3", "running", 0, 100, "Checking smoke imports")
+        if env_path.exists():
+            r = self._run_command([str(mm_exe), "run", "-p", str(env_path), "python", "-c", "import torch, onnxruntime, huggingface_hub"], status_cb=status_cb, label="verify-smoke", attempts=1, idle_timeout_s=120, hard_timeout_s=300)
+            mark("C3", "done" if r.returncode == 0 else "missing", "smoke imports OK" if r.returncode == 0 else "smoke imports missing")
+        else:
+            mark("C3", "missing", "runtime env missing")
+
+        # E1 manifest
+        self._stage(stage_cb, "E1", "running", 0, 100, "Checking manifest")
+        if self.manifest.path.exists():
+            try:
+                json.loads(self.manifest.path.read_text(encoding="utf-8"))
+                mark("E1", "done", "manifest readable")
+            except Exception as exc:
+                mark("E1", "failed", "manifest corrupted", details=str(exc), recoverable=False)
+        else:
+            mark("E1", "missing", "manifest missing")
+
+        # E2 finalize marker
+        self._stage(stage_cb, "E2", "running", 0, 100, "Finalize check")
+        mark("E2", "done", "verification completed")
+        return results
 
     def _deploy_backend_script(self, src: Path) -> None:
         dst = self.install_root / "app" / "shared" / "runtime_backend.py"
