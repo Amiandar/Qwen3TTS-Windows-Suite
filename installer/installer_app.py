@@ -260,9 +260,11 @@ class InstallerWindow(QMainWindow):
         for row, (sid, title) in enumerate([
             ("B1", "micromamba_bootstrap"), ("B2", "env_create_or_update"), ("B3", "cache_temp_redirects"),
             ("C1", "pip_bootstrap"), ("C2", "runtime_requirements_install"), ("C3", "smoke_imports"),
-            ("E1", "write_manifest"), ("E2", "finalize"),
+            ("E1", "write_manifest"), ("E2", "summary"),
         ]):
             p = QProgressBar(); p.setRange(0, 100)
+            p.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            p.setFormat("%p%")
             lbl = QLabel("Pending")
             grid.addWidget(QLabel(title), row, 0); grid.addWidget(p, row, 1); grid.addWidget(lbl, row, 2)
             self.stage_rows[sid] = (p, lbl)
@@ -280,6 +282,7 @@ class InstallerWindow(QMainWindow):
             "running": "#3b82f6",
             "done": "#22c55e",
             "missing": "#f59e0b",
+            "warning": "#f59e0b",
             "failed": "#ef4444",
             "skipped": "#94a3b8",
         }
@@ -429,21 +432,31 @@ class InstallerWindow(QMainWindow):
         self.model_overall.setValue(max(0, min(percent, 100)))
 
     def _on_model_progress(self, model_id: str, current: int, total: int, message: str):
-        st = self.model_states.setdefault(model_id, {"status": "NotInstalled", "bytes_done": 0, "bytes_total": 1, "error_message": ""})
-        st["bytes_done"] = max(int(current), 0)
-        st["bytes_total"] = max(int(total), 1)
-        if message == "Done":
-            st["status"] = "Installed"
-            st["bytes_done"] = st["bytes_total"]
-        elif "Cancelled" in message:
-            st["status"] = "Cancelled"
-        elif "ERROR" in message:
-            st["status"] = "Failed"; st["error_message"] = message
-        else:
-            st["status"] = "Downloading"
-        self._update_overall_model_progress()
-        self.model_detail.setText(f"{model_id}: {st['status']} ({st['bytes_done']} / {st['bytes_total']} bytes)")
-        self.refresh_model_buttons()
+        try:
+            st = self.model_states.setdefault(model_id, {"status": "NotInstalled", "bytes_done": 0, "bytes_total": 1, "error_message": ""})
+            st["bytes_done"] = max(int(current), 0)
+            st["bytes_total"] = max(int(total), 1)
+            if message == "Done":
+                st["status"] = "Installed"
+                st["bytes_done"] = st["bytes_total"]
+            elif "Cancelled" in message:
+                st["status"] = "Cancelled"
+            elif "ERROR" in message:
+                st["status"] = "Failed"; st["error_message"] = message
+            else:
+                st["status"] = "Downloading"
+            self._update_overall_model_progress()
+            self.model_detail.setText(f"{model_id}: {st['status']} ({st['bytes_done']} / {st['bytes_total']} bytes)")
+            self.refresh_model_buttons()
+        except Exception:
+            err = traceback.format_exc()
+            self.append_log("ERROR: model progress update failed")
+            self.append_log(err)
+            st = self.model_states.setdefault(model_id, {"status": "Failed", "bytes_done": 0, "bytes_total": 1, "error_message": ""})
+            st["status"] = "Failed"
+            st["error_message"] = err
+            self.model_detail.setText(f"{model_id}: failed (see log)")
+            self.refresh_model_buttons()
 
     def download_models(self):
         models = self._missing_selected_models()
@@ -451,6 +464,12 @@ class InstallerWindow(QMainWindow):
             QMessageBox.information(self, "Models", "Select at least one missing model")
             return
         self.model_cancel.clear()
+        cache_root = str(self.core.settings.get("cache_root", "")).strip() or str(self.install_root / "cache")
+        model_root = str(Path(cache_root) / "models")
+        self.append_log(
+            "Model download start: "
+            f"models={models}; local_dir={model_root}; method=hf_hub_download; resume=True"
+        )
         self.model_detail.setText("Downloading selected models...")
         self.refresh_model_buttons()
 
