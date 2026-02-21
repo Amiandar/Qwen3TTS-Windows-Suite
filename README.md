@@ -52,22 +52,23 @@ Qwen3TTS Windows Suite — это набор из двух Windows-прилож�
 
 ## RU — Сборка из исходников
 ```bat
-scripts\build_installer.cmd
-scripts\build_studio.cmd
+scripts\build_all.cmd --clean
 ```
 
-Скрипты сборки создают изолированные окружения `.build_venv_installer` и `.build_venv_studio`, ставят зависимости из `requirements_build_*.txt` и запускают PyInstaller через python из этих venv.
+Скрипт `scripts\build_all.cmd` создаёт изолированное окружение `.build_venv_release`, ставит зависимости из `requirements_build.txt` и последовательно собирает Setup/App/Remove.
+- корневой `build_all.cmd` — тонкий враппер, который вызывает `scripts\build_all.cmd`.
 
 Разделение зависимостей:
-- `requirements_build_installer.txt` и `requirements_build_studio.txt` — только зависимости для сборки GUI exe.
+- `requirements_build.txt` — единый набор зависимостей для сборки всех GUI exe.
 - `requirements_runtime.txt` — inference/ML зависимости (qwen-tts/torch/onnxruntime и т.д.), их ставит только Installer в runtime-окружение внутри выбранного Install Root.
 - Studio.exe — GUI-оболочка: запускает backend через runtime python из install-root, сама не тянет ML-стек при сборке.
 
 Поведение артефактов:
 - `build\` — временные файлы PyInstaller (можно удалять).
 - `dist\` — готовая сборка для запуска.
-- Для onedir-сборки запускайте exe **из папки** `dist\Qwen3TTS-Installer\` или `dist\Qwen3TTS-Studio\`; не выносите exe отдельно.
-- `build_installer.cmd` добавляет `requirements_runtime.txt` и `shared\runtime_backend.py` в пакет (`--add-data`), чтобы Installer.exe корректно находил runtime-зависимости и backend-скрипт в packaged режиме.
+- Итоговая единая папка релиза: `dist\Qwen3GUI\` с `Qwen3GUI-Setup.exe`, `Qwen3GUI.exe`, `Qwen3GUI-Remove.exe`.
+- Для onedir-сборки не выносите exe отдельно: каждый exe использует свой contents-dir (`_setup`, `_app`, `_remove`).
+- Setup-сборка добавляет `requirements_runtime.txt` и `shared\runtime_backend.py` в свой contents-dir.
 
 ## RU — Dev запуск
 ```bat
@@ -78,7 +79,8 @@ scripts\dev_run_studio.cmd
 - Smoke удаления: `python -m installer.tools.uninstall_smoke`
 
 ## RU — Uninstall
-- Режим удаления: `python -m installer.installer_app --uninstall --dry-run`
+- Отдельный деинсталлятор: `Qwen3GUI-Remove.exe` в `dist\Qwen3GUI\` рядом с `Qwen3GUI-Setup.exe`.
+- CLI запуск для разработки: `python -m installer.uninstall_app --dry-run`.
 - По умолчанию используется манифест `InstallRoot\install_manifest.json` (можно указать `--manifest <path>`).
 
 ## RU — Troubleshooting
@@ -87,6 +89,7 @@ scripts\dev_run_studio.cmd
 - Не найден ffmpeg: повторите repair через Installer Components.
 - Нехватка VRAM: используйте 0.6B или CPU.
 - Ошибки прав: выберите Install/Cache/Temp в доступных папках пользователя.
+- Если Installer аварийно завершился: проверьте лог `InstallRoot\logs\installer_runtime_page.log`.
 
 ---
 
@@ -142,22 +145,24 @@ Qwen3TTS Windows Suite is a pair of Windows apps for non-technical users:
 
 ## EN — Build from source
 ```bat
-scripts\build_installer.cmd
-scripts\build_studio.cmd
+scripts\build_all.cmd --clean
 ```
+- Unified build: `scripts\build_all.cmd --clean` creates `dist\Qwen3GUI\` with `Qwen3GUI-Setup.exe`, `Qwen3GUI.exe`, `Qwen3GUI-Remove.exe` and separate onedir content folders `_setup`, `_app`, `_remove`.
 
-Build scripts create isolated venvs `.build_venv_installer` and `.build_venv_studio`, install dependencies from `requirements_build_*.txt`, and run PyInstaller using each venv Python.
+`scripts\build_all.cmd` creates a single isolated venv `.build_venv_release`, installs dependencies from `requirements_build.txt`, and builds Setup/App/Remove in one run.
+- root `build_all.cmd` is a thin wrapper that forwards to `scripts\build_all.cmd`.
 
 Dependency split:
-- `requirements_build_installer.txt` and `requirements_build_studio.txt` contain GUI/build-only dependencies.
+- `requirements_build.txt` contains unified GUI/build dependencies for all executables.
 - `requirements_runtime.txt` contains inference/ML dependencies (qwen-tts/torch/onnxruntime etc.) and is installed only by Installer into the selected Install Root runtime environment.
 - Studio.exe is a GUI shell: it launches backend inference through runtime Python from install-root and does not pull ML stack during Studio build.
 
 Artifact behavior:
 - `build\` — temporary PyInstaller files (safe to delete).
 - `dist\` — final runnable output.
-- For onedir builds, run exe **from inside** `dist\Qwen3TTS-Installer\` or `dist\Qwen3TTS-Studio\`; do not move the exe out alone.
-- `build_installer.cmd` bundles `requirements_runtime.txt` into `_internal` and `shared\runtime_backend.py` into `_internal\shared` via `--add-data` so Installer.exe can resolve runtime requirements and backend script in packaged mode.
+- Unified release folder: `dist\Qwen3GUI\` with `Qwen3GUI-Setup.exe`, `Qwen3GUI.exe`, `Qwen3GUI-Remove.exe`.
+- For onedir builds, do not move executables out alone: each exe uses its own contents folder (`_setup`, `_app`, `_remove`).
+- Setup build bundles `requirements_runtime.txt` and `shared\runtime_backend.py` into setup contents so runtime requirements/backend can be resolved in packaged mode.
 
 ## EN — Dev run
 ```bat
@@ -168,7 +173,8 @@ scripts\dev_run_studio.cmd
 - Uninstall smoke: `python -m installer.tools.uninstall_smoke`
 
 ## EN — Uninstall
-- Uninstall mode: `python -m installer.installer_app --uninstall --dry-run`
+- Dedicated uninstaller: `Qwen3GUI-Remove.exe` in `dist\Qwen3GUI\` next to `Qwen3GUI-Setup.exe`.
+- Dev CLI mode: `python -m installer.uninstall_app --dry-run`.
 - Default manifest: `InstallRoot\install_manifest.json` (override with `--manifest <path>`).
 
 ## EN — Troubleshooting
@@ -177,3 +183,4 @@ scripts\dev_run_studio.cmd
 - Missing ffmpeg: run Installer repair/components again.
 - Low VRAM: use 0.6B models or CPU mode.
 - Permission errors: choose user-writable Install/Cache/Temp folders.
+- If Installer crashes unexpectedly: check `InstallRoot\logs\installer_runtime_page.log`.

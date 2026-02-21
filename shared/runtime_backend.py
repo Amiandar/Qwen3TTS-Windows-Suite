@@ -40,6 +40,7 @@ def run_generate(payload: dict) -> int:
         ffmpeg_bin = Path(params.get("ffmpeg_bin") or "ffmpeg")
 
         for idx, chunk in enumerate(chunks, start=1):
+            emit("progress", current=idx - 1, total=len(chunks), chunk_current=0, chunk_total=100, message=f"Generating chunk {idx}/{len(chunks)}")
             wav_path = temp_work / f"{idx:03d}.wav"
             mp3_path = output_dir / f"{idx:03d}.mp3"
             family = "VoiceDesign" if "VoiceDesign" in model_id else "CustomVoice" if "CustomVoice" in model_id else "Base"
@@ -67,7 +68,7 @@ def run_generate(payload: dict) -> int:
                 audio = model.generate_voice_design(text=chunk, instruct=params.get("instruct", ""), language=params.get("language", "Russian"))
             sf.write(wav_path, audio, samplerate=24000)
             wav_to_mp3(ffmpeg_bin, wav_path, mp3_path, bitrate_kbps=int(params.get("bitrate", 128)), vbr=params.get("vbr", False))
-            emit("progress", current=idx, total=len(chunks), message=f"Saved {mp3_path.name}")
+            emit("progress", current=idx, total=len(chunks), chunk_current=100, chunk_total=100, message=f"Saved {mp3_path.name}")
     finally:
         if not params.get("keep_temp", False):
             shutil.rmtree(temp_work, ignore_errors=True)
